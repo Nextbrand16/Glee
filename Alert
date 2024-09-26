@@ -295,3 +295,111 @@ power_off_alert_criteria = {
   operator         = "Equals"
   threshold        = 1
 }
+
+
+
+
+
+Yes, the root module will need a variables.tf file to define the variables that it expects to receive values for (e.g., from terraform.tfvars or other sources). This will make sure the root module correctly references the input variables used in the terraform.tfvars file.
+
+root/variables.tf
+
+Here is the complete variables.tf for the root module:
+
+variable "resource_group_name" {
+  description = "The name of the resource group where the VMs are located."
+  type        = string
+}
+
+variable "vm_ids" {
+  description = "A map of VM IDs that will be monitored."
+  type        = map(string)
+}
+
+variable "alert_action_group_ids" {
+  description = "A list of action group IDs where alerts will send notifications."
+  type        = list(string)
+}
+
+# CPU alert criteria
+variable "cpu_alert_criteria" {
+  description = "Criteria for CPU usage alerts."
+  type = object({
+    frequency        = string
+    window_size      = string
+    severity         = number
+    metric_namespace = string
+    metric_name      = string
+    aggregation      = string
+    operator         = string
+    threshold        = number
+  })
+}
+
+# Disk space alert criteria
+variable "disk_alert_criteria" {
+  description = "Criteria for disk space usage alerts."
+  type = object({
+    frequency        = string
+    window_size      = string
+    severity         = number
+    metric_namespace = string
+    metric_name      = string
+    aggregation      = string
+    operator         = string
+    threshold        = number
+  })
+}
+
+# Memory alert criteria
+variable "memory_alert_criteria" {
+  description = "Criteria for available memory alerts."
+  type = object({
+    frequency        = string
+    window_size      = string
+    severity         = number
+    metric_namespace = string
+    metric_name      = string
+    aggregation      = string
+    operator         = string
+    threshold        = number
+  })
+}
+
+# Power-off alert criteria
+variable "power_off_alert_criteria" {
+  description = "Criteria for VM power-off alerts."
+  type = object({
+    frequency        = string
+    window_size      = string
+    severity         = number
+    metric_namespace = string
+    metric_name      = string
+    aggregation      = string
+    operator         = string
+    threshold        = number
+  })
+}
+
+
+---
+
+Explanation:
+
+resource_group_name: Name of the resource group where the VMs are deployed.
+
+vm_ids: Map of VM IDs that will be monitored for alerts.
+
+alert_action_group_ids: List of action group IDs where alerts are sent.
+
+cpu_alert_criteria: Criteria for CPU usage alert.
+
+disk_alert_criteria: Criteria for disk space alert.
+
+memory_alert_criteria: Criteria for memory usage alert.
+
+power_off_alert_criteria: Criteria for VM power-off alert.
+
+
+This variables.tf will allow the root module to properly reference the variables defined in the terraform.tfvars file and pass them to the module for alert configuration.
+
