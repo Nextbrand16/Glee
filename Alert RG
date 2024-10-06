@@ -1,314 +1,351 @@
-To allow separate configurations for different sets of VMs, we can modify the code to support passing different alert configurations per resource group through the tfvars. This way, the user can define different alert settings for different sets of VMs or groups.
-
-Updated Module
-
-The module will allow you to configure separate alert criteria (like CPU, memory, disk, power-off) for each resource group. I will update the module and tfvars accordingly to support this.
+Below is the revised modularized configuration that splits the CPU alert and the Power Off alert for Action Group 1.
 
 
 ---
 
-Module (monitoring_alerts/)
+Module Code (modules/azure_monitor/)
 
-variables.tf (Module Input Variables)
+Action Groups Module (modules/azure_monitor/action_groups.tf)
 
-We'll adjust the variables to allow specifying individual alert settings per resource group.
+resource "azurerm_monitor_action_group" "this" {
+  for_each = var.action_groups
 
-variable "resource_groups" {
-  description = "A map of resource groups to their alert configurations"
+  name                = each.value.name
+  resource_group_name = each.value.resource_group_name
+  short_name          = each.value.short_name
+
+  dynamic "email_receiver" {
+    for_each = each.value.email_receivers
+    content {
+      name          = email_receiver.value.name
+      email_address = email_receiver.value.email
+    }
+  }
+
+  tags = each.value.tags
+}
+
+Metric Alerts Module (modules/azure_monitor/metric_alerts.tf)
+
+resource "azurerm_monitor_metric_alert" "this" {
+  for_each = var.metric_alerts
+
+  name                = each.value.name
+  resource_group_name = each.value.resource_group_name
+  scopes              = each.value.scopes
+  description         = each.value.description
+  frequency           = each.value.frequency
+  window_size         = each.value.window_size
+  severity            = each.value.severity
+
+  dynamic "criteria" {
+    for_each = each.value.criteria
+    content {
+      metric_namespace = criteria.value.metric_namespace
+      metric_name      = criteria.value.metric_name
+      aggregation      = criteria.value.aggregation
+      operator         = criteria.value.operator
+      threshold        = criteria.value.threshold
+    }
+  }
+
+  dynamic "action" {
+    for_each = each.value.action_group_ids
+    content {
+      action_group_id = azurerm_monitor_action_group.this[action.value].id
+    }
+  }
+
+  tags = each.value.tags
+}
+
+Scheduled Query Rules Module (modules/azure_monitor/scheduled_query_rules.tf)
+
+resource "azurerm_monitor_scheduled_query_rules_alert" "this" {
+  for_each = var.scheduled_query_rules
+
+  name                = each.value.name
+  resource_group_name = each.value.resource_group_name
+  description         = each.value.description
+  frequency           = each.value.frequency
+  severity            = each.value.severity
+
+  data_source_id = each.value.data_source_id  # Log Analytics Workspace ID
+
+  dynamic "action" {
+    for_each = each.value.action_group_ids
+    content {
+      action_group_id = azurerm_monitor_action_group.this[action.value].id
+    }
+  }
+
+  query = each.value.query
+
+  tags = each.value.tags
+}
+
+
+---
+
+Variables for Module (modules/azure_monitor/variables.tf)
+
+# Action Groups Variable
+variable "action_groups" {
   type = map(object({
-    cpu_alert_criteria = object({
-      frequency        = string
-      window_size      = string
-      severity         = number
-      metric_namespace = string
-      metric_name      = string
-      aggregation      = string
-      operator         = string
-      threshold        = number
-    })
-    memory_alert_criteria = object({
-      frequency        = string
-      window_size      = string
-      severity         = number
-      metric_namespace = string
-      metric_name      = string
-      aggregation      = string
-      operator         = string
-      threshold        = number
-    })
-    disk_alert_criteria = object({
-      frequency        = string
-      window_size      = string
-      severity         = number
-      metric_namespace = string
-      metric_name      = string
-      aggregation      = string
-      operator         = string
-      threshold        = number
-    })
-    power_off_alert_criteria = object({
-      frequency        = string
-      window_size      = string
-      severity         = number
-      metric_namespace = string
-      metric_name      = string
-      aggregation      = string
-      operator         = string
-      threshold        = number
-    })
+    name                = string
+    resource_group_name = string
+    short_name          = string
+    email_receivers = list(object({
+      name  = string
+      email = string
+    }))
+    tags = map(string)
   }))
 }
 
-variable "alert_action_group_ids" {
-  description = "A list of action group IDs to send notifications for alerts"
-  type        = list(string)
-}
-
-main.tf (Module Logic)
-
-We'll now loop over each resource group and its corresponding alert criteria. This makes the alerting logic more flexible.
-
-resource "azurerm_monitor_metric_alert" "cpu_alert" {
-  for_each = var.resource_groups
-
-  name                = "cpu-alert-${each.key}"
-  resource_group_name = each.key
-  scopes              = data.azurerm_virtual_machine.vm_ids[*].id
-  description         = "CPU alert for VMs in resource group ${each.key}"
-  frequency           = each.value.cpu_alert_criteria.frequency
-  window_size         = each.value.cpu_alert_criteria.window_size
-  severity            = each.value.cpu_alert_criteria.severity
-
-  criteria {
-    metric_namespace = each.value.cpu_alert_criteria.metric_namespace
-    metric_name      = each.value.cpu_alert_criteria.metric_name
-    aggregation      = each.value.cpu_alert_criteria.aggregation
-    operator         = each.value.cpu_alert_criteria.operator
-    threshold        = each.value.cpu_alert_criteria.threshold
-  }
-
-  dynamic "action" {
-    for_each = var.alert_action_group_ids
-    content {
-      action_group_id = action.value
-    }
-  }
-}
-
-resource "azurerm_monitor_metric_alert" "memory_alert" {
-  for_each = var.resource_groups
-
-  name                = "memory-alert-${each.key}"
-  resource_group_name = each.key
-  scopes              = data.azurerm_virtual_machine.vm_ids[*].id
-  description         = "Memory alert for VMs in resource group ${each.key}"
-  frequency           = each.value.memory_alert_criteria.frequency
-  window_size         = each.value.memory_alert_criteria.window_size
-  severity            = each.value.memory_alert_criteria.severity
-
-  criteria {
-    metric_namespace = each.value.memory_alert_criteria.metric_namespace
-    metric_name      = each.value.memory_alert_criteria.metric_name
-    aggregation      = each.value.memory_alert_criteria.aggregation
-    operator         = each.value.memory_alert_criteria.operator
-    threshold        = each.value.memory_alert_criteria.threshold
-  }
-
-  dynamic "action" {
-    for_each = var.alert_action_group_ids
-    content {
-      action_group_id = action.value
-    }
-  }
-}
-
-resource "azurerm_monitor_metric_alert" "disk_alert" {
-  for_each = var.resource_groups
-
-  name                = "disk-alert-${each.key}"
-  resource_group_name = each.key
-  scopes              = data.azurerm_virtual_machine.vm_ids[*].id
-  description         = "Disk space alert for VMs in resource group ${each.key}"
-  frequency           = each.value.disk_alert_criteria.frequency
-  window_size         = each.value.disk_alert_criteria.window_size
-  severity            = each.value.disk_alert_criteria.severity
-
-  criteria {
-    metric_namespace = each.value.disk_alert_criteria.metric_namespace
-    metric_name      = each.value.disk_alert_criteria.metric_name
-    aggregation      = each.value.disk_alert_criteria.aggregation
-    operator         = each.value.disk_alert_criteria.operator
-    threshold        = each.value.disk_alert_criteria.threshold
-  }
-
-  dynamic "action" {
-    for_each = var.alert_action_group_ids
-    content {
-      action_group_id = action.value
-    }
-  }
-}
-
-resource "azurerm_monitor_metric_alert" "power_off_alert" {
-  for_each = var.resource_groups
-
-  name                = "power-off-alert-${each.key}"
-  resource_group_name = each.key
-  scopes              = data.azurerm_virtual_machine.vm_ids[*].id
-  description         = "Power-off alert for VMs in resource group ${each.key}"
-  frequency           = each.value.power_off_alert_criteria.frequency
-  window_size         = each.value.power_off_alert_criteria.window_size
-  severity            = each.value.power_off_alert_criteria.severity
-
-  criteria {
-    metric_namespace = each.value.power_off_alert_criteria.metric_namespace
-    metric_name      = each.value.power_off_alert_criteria.metric_name
-    aggregation      = each.value.power_off_alert_criteria.aggregation
-    operator         = each.value.power_off_alert_criteria.operator
-    threshold        = each.value.power_off_alert_criteria.threshold
-  }
-
-  dynamic "action" {
-    for_each = var.alert_action_group_ids
-    content {
-      action_group_id = action.value
-    }
-  }
-}
-
-data "azurerm_virtual_machine" "vm_ids" {
-  for_each = var.resource_groups
-  resource_group_name = each.key
-}
-
-
----
-
-Root Module
-
-main.tf (Root Module Logic)
-
-module "monitoring_alerts" {
-  source              = "./monitoring_alerts"
-  resource_groups     = var.resource_groups
-  alert_action_group_ids = var.alert_action_group_ids
-}
-
-variables.tf (Root Variables)
-
-Define variables that you want to pass down into the module:
-
-variable "resource_groups" {
-  description = "A map of resource groups with their alert criteria"
+# Metric Alerts Variable
+variable "metric_alerts" {
   type = map(object({
-    cpu_alert_criteria    = object(...)
-    memory_alert_criteria = object(...)
-    disk_alert_criteria   = object(...)
-    power_off_alert_criteria = object(...)
+    name                = string
+    resource_group_name = string
+    scopes              = list(string)
+    description         = string
+    frequency           = string
+    window_size         = string
+    severity            = number
+    criteria = list(object({
+      metric_namespace = string
+      metric_name      = string
+      aggregation      = string
+      operator         = string
+      threshold        = number
+    }))
+    action_group_ids = list(string)
+    tags             = map(string)
   }))
 }
 
-variable "alert_action_group_ids" {
-  description = "A list of action group IDs for alerts"
-  type        = list(string)
+# Scheduled Query Rules Variable
+variable "scheduled_query_rules" {
+  type = map(object({
+    name                = string
+    resource_group_name = string
+    description         = string
+    frequency           = string
+    severity            = number
+    data_source_id      = string  # Log Analytics Workspace ID
+    query               = string
+    action_group_ids    = list(string)
+    tags                = map(string)
+  }))
 }
 
 
 ---
 
-Example terraform.tfvars File
+Root Module (main.tf)
 
-Here’s an example terraform.tfvars file that configures different alert criteria for different resource groups:
+module "azure_monitor" {
+  source = "./modules/azure_monitor"
 
-resource_groups = {
-  "resource-group-1" = {
-    cpu_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT5M"
-      severity         = 2
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Percentage CPU"
-      aggregation      = "Average"
-      operator         = "GreaterThan"
-      threshold        = 80
-    }
-    memory_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT5M"
-      severity         = 2
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Percentage Memory Used"
-      aggregation      = "Average"
-      operator         = "GreaterThan"
-      threshold        = 75
-    }
-    disk_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT5M"
-      severity         = 3
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Percentage Disk Used"
-      aggregation      = "Average"
-      operator         = "GreaterThan"
-      threshold        = 90
-    }
-    power_off_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT5M"
-      severity         = 3
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Power Off"
-      aggregation      = "Count"
-      operator         = "GreaterThan"
-      threshold        = 0
-    }
-  }
+  action_groups         = var.action_groups
+  metric_alerts         = var.metric_alerts
+  scheduled_query_rules = var.scheduled_query_rules
+}
 
-  "resource-group-2" = {
-    cpu_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT10M"
-      severity         = 3
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Percentage CPU"
-      aggregation      = "Average"
-      operator         = "GreaterThan"
-      threshold        = 85
+
+---
+
+Variables for Root Module (variables.tf)
+
+variable "action_groups" {
+  description = "Action groups configuration"
+  type = map(object({
+    name                = string
+    resource_group_name = string
+    short_name          = string
+    email_receivers = list(object({
+      name  = string
+      email = string
+    }))
+    tags = map(string)
+  }))
+}
+
+variable "metric_alerts" {
+  description = "Metric alerts configuration"
+  type = map(object({
+    name                = string
+    resource_group_name = string
+    scopes              = list(string)
+    description         = string
+    frequency           = string
+    window_size         = string
+    severity            = number
+    criteria = list(object({
+      metric_namespace = string
+      metric_name      = string
+      aggregation      = string
+      operator         = string
+      threshold        = number
+    }))
+    action_group_ids = list(string)
+    tags             = map(string)
+  }))
+}
+
+variable "scheduled_query_rules" {
+  description = "Scheduled query rules configuration"
+  type = map(object({
+    name                = string
+    resource_group_name = string
+    description         = string
+    frequency           = string
+    severity            = number
+    data_source_id      = string
+    query               = string
+    action_group_ids    = list(string)
+    tags                = map(string)
+  }))
+}
+
+
+---
+
+Root Module Input (terraform.tfvars)
+
+In the tfvars, we now split the CPU alert and Power Off alert for Action Group 1.
+
+action_groups = {
+  "group1" = {
+    name                = "ActionGroup1"
+    resource_group_name = "rg1"
+    short_name          = "AG1"
+    email_receivers = [
+      {
+        name  = "Admin1"
+        email = "admin1@example.com"
+      },
+      {
+        name  = "Admin2"
+        email = "admin2@example.com"
+      }
+    ]
+    tags = {
+      Environment = "Production"
     }
-    memory_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT10M"
-      severity         = 3
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Percentage Memory Used"
-      aggregation      = "Average"
-      operator         = "GreaterThan"
-      threshold        = 80
-    }
-    disk_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT5M"
-      severity         = 2
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Percentage Disk Used"
-      aggregation      = "Average"
-      operator         = "GreaterThan"
-      threshold        = 85
-    }
-    power_off_alert_criteria = {
-      frequency        = "PT1M"
-      window_size      = "PT10M"
-      severity         = 3
-      metric_namespace = "Microsoft.Compute/virtualMachines"
-      metric_name      = "Power Off"
-      aggregation      = "Count"
-      operator         = "GreaterThan"
-      threshold        = 0
+  },
+  "group2" = {
+    name                = "ActionGroup2"
+    resource_group_name = "rg2"
+    short_name          = "AG2"
+    email_receivers = [
+      {
+        name  = "Admin3"
+        email = "admin3@example.com"
+      },
+      {
+        name  = "Admin4"
+        email = "admin4@example.com"
+      }
+    ]
+    tags = {
+      Environment = "Development"
     }
   }
 }
 
-alert_action_group_ids = [
-  "/subscriptions/YOUR_SUBSCRIPTION_ID/resourceGroups/alert-rg/providers/microsoft.insights/actionGroups/YOUR_ACTION_GROUP_1",
-  "/subscriptions/YOUR_SUBSCRIPTION_ID/resourceGroups/alert-rg/providers/microsoft.insights/actionGroups/YOUR_ACTION_GROUP_2"
-]
+metric_alerts = {
+  # CPU Alert for Action Group 1
+  "cpu_alert" = {
+    name                = "MetricAlert_CPU"
+    resource_group_name = "rg1"
+    scopes              = ["/subscriptions/<subscription_id>/resourceGroups/rg1"]
+    description         = "Alert for CPU utilization"
+    frequency           = "PT5M"
+    window_size         = "PT10M"
+    severity            = 2
+    criteria = [
+      {
+        metric_namespace = "Microsoft.Compute/virtualMachines"
+        metric_name      = "Percentage CPU"
+        aggregation      = "Average"
+        operator         = "GreaterThan"
+        threshold        = 80
+      }
+    ]
+    action_group_ids = ["group1"]
+    tags = {
+      Environment = "Production"
+    }
+  },
+  
+  # Power Off Alert for Action Group 1
+  "poweroff_alert" = {
+    name                = "MetricAlert_PowerOff"
+    resource_group_name = "rg1"
+    scopes              = ["/subscriptions/<subscription_id>/resourceGroups/rg1"]
+    description         = "Alert for Power Off event"
+    frequency           = "PT5M"
+    window_size         = "PT10M"
+    severity            = 3
+    criteria = [
+      {
+        metric_namespace = "Microsoft.Compute/virtualMachines"
+        metric_name      = "Power Off"
+        aggregation      = "Total"
+        operator         = "GreaterThan"
+        threshold        = 1
+      }
+    ]
+    action_group_ids = ["group1"]
+    tags = {
+      Environment = "Production"
+    }
+  },
+  
+  # Disk Space Alert for Action Group 2
+  "disk_alert" = {
+    name                = "MetricAlert_DiskSpace"
+    resource_group_name = "rg2"
+    scopes              = ["/subscriptions/<subscription_id>/resourceGroups/rg2"]
+    description         = "Alert for Disk Space utilization"
+    frequency           = "PT10M"
+    window_size         = "PT15M"
+    severity            = 3
+    criteria = [
+      {
+        metric_namespace = "Microsoft.Compute/virtualMachines"
+        metric_name      = "Disk Read Operations/Sec"
+        aggregation      = "Average"
+        operator         = "GreaterThan"
+        threshold        = 100
+      }
+    ]
+    action_group_ids = ["group2"]
+    tags = {
+      Environment = "Development"
+    }
+  }
+}
+
+scheduled_query_rules = {
+  # Scheduled query rule for disk monitoring
+  "query_rule1" = {
+    name                = "QueryRule1"
+    resource_group_name = "rg1"
+    description         = "Monitor disk usage"
+    frequency           = "PT5M"
+    severity            = 2
+    data_source_id      = "/subscriptions/<subscription_id>/resourceGroups/rg1/providers/Microsoft.OperationalInsights/workspaces/log-analytics-id"
+    query               = <<QUERY
+      Perf
+      | where ObjectName == "LogicalDisk" and CounterName == "% Free Space"
+      | summarize avg(CounterValue) by bin(TimeGenerated, 5m), Computer
+    QUERY
+    action_group_ids    = ["group1"]
+    tags = {
+      Environment = "Production"
+    }
+  }
+}
