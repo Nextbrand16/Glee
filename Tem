@@ -1,35 +1,242 @@
-Subject: Change Closure with Issues and Recommendations for Future Improvement
-
-Dear Change Management Team,
-
-I would like to provide an update on the change raised to power down 10 virtual machines as part of our scheduled activity.
-
-Summary of Events:
-
-Successfully Powered Down: 7 out of the 10 virtual machines were successfully powered down as planned.
-
-Already Powered Down: 1 virtual machine was already powered down before the change window for pre-testing purposes.
-
-Pending Power Down: 2 virtual machines were not powered down due to further testing required within the environment.
-
-
-Additionally, during the process, a replica has remained available in the CF environment.
-
-Issue Noted: The change has been marked as closed with issues due to the 2 virtual machines not being powered down and the replica remaining active.
-
-Recommendations for Future Prevention: To avoid similar issues in future changes, the following actions are recommended:
-
-1. Pre-Change Status Verification: Ensure all machines’ statuses are verified prior to the change window to confirm their initial state (e.g., powered on or powered off).
-
-
-2. Clear Communication on Testing Needs: Collaborate with testing teams beforehand to confirm if any machines need to remain powered on for further testing, and include this as a known exception in the change plan.
-
-
-3. Replica Management: Ensure replicas in environments like CF are explicitly accounted for and included in the scope of the change if they need to be powered down.
-
-
-4. Post-Change Review: Conduct a thorough post-change review immediately after the window to ensure all targets are aligned with the change objectives and to address any discrepancies before closure.
+I understand you're looking to automate post-build activities for new Windows servers in Azure. I'll provide a PowerShell script that can accomplish these tasks securely and efficiently. Let's break this down into steps and then combine them into a complete script.
 
 
 
-We appreciate your attention to this and will implement these measures to improve the process in future changes.
+```powershell
+# Azure Windows Server Post-Build Automation Script
+
+# Prerequisites
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$LocalUsername,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$DomainUsername,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$ADAdminUsername,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$KeyVaultName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$DomainName,
+    
+    [Parameter(Mandatory=$true)]
+    [string[]]$ADGroups,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$InventoryFile
+)
+
+# Function to securely get password from Azure Key Vault
+function Get-SecurePasswordFromKeyVault {
+    param(
+        [string]$VaultName,
+        [string]$SecretName
+    )
+    
+    try {
+        $secret = Get-AzKeyVaultSecret -VaultName $VaultName -Name $SecretName
+        return $secret.SecretValue
+    }
+    catch {
+        Write-Error "Failed to retrieve secret $SecretName from Key Vault $VaultName: $_"
+        return $null
+    }
+}
+
+# Function to add server to domain
+function Add-ServerToDomain {
+    param(
+        [string]$DomainName,
+        [System.Management.Automation.PSCredential]$Credential
+    )
+    
+    try {
+        $currentDomain = (Get-WmiObject Win32_ComputerSystem).Domain
+        if ($currentDomain -ne $DomainName) {
+            Add-Computer -DomainName $DomainName -Credential $Credential -Restart:$false -ErrorAction Stop
+            Write-Host "Successfully added server to domain $DomainName"
+        }
+        else {
+            Write-Host "Server is already a member of domain $DomainName"
+        }
+    }
+    catch {
+        Write-Error "Failed to add server to domain: $_"
+    }
+}
+
+# Function to add AD groups to local groups
+function Add-ADGroupsToLocalGroups {
+    param(
+        [string[]]$Groups,
+        [System.Management.Automation.PSCredential]$Credential
+    )
+    
+    try {
+        foreach ($group in $Groups) {
+            Add-LocalGroupMember -Group "Administrators" -Member $group -ErrorAction Stop
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $group -ErrorAction Stop
+            Add-LocalGroupMember -Group "Remote Management Users" -Member $group -ErrorAction Stop
+        }
+        Write-Host "Successfully added AD groups to local groups"
+    }
+    catch {
+        Write-Error "Failed to add AD groups to local groups: $_"
+    }
+}
+
+# Function to set time zone
+function Set-ServerTimeZone {
+    try {
+        Set-TimeZone -Id "GMT Standard Time" -ErrorAction Stop
+        Write-Host "Successfully set time zone to London (GMT)"
+    }
+    catch {
+        Write-Error "Failed to set time zone: $_"
+    }
+}
+
+# Function to copy Snow Discovery folder
+function Copy-SnowDiscoveryFolder {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath
+    )
+    
+    try {
+        Copy-Item -Path $SourcePath -Destination $DestinationPath -Recurse -Force -ErrorAction Stop
+        Write-Host "Successfully copied Snow Discovery folder"
+    }
+    catch {
+        Write-Error "Failed to copy Snow Discovery folder: $_"
+    }
+}
+
+# Function to configure Snow Discovery
+function Configure-SnowDiscovery {
+    try {
+        Register-PSSessionConfiguration -Name snow_jea_disco -Path 'C:\Windows\System32\WindowsPowerShellv1.0\Modules\snow_jea_disco\snow_jea_disco.pssc' -ErrorAction Stop
+        Restart-Service winrm -ErrorAction Stop
+        $config = Get-PSSessionConfiguration
+        Write-Host "Successfully configured Snow Discovery"
+        return $config
+    }
+    catch {
+        Write-Error "Failed to configure Snow Discovery: $_"
+        return $null
+    }
+}
+
+# Main script execution
+try {
+    # Get passwords from Key Vault
+    $localPassword = Get-SecurePasswordFromKeyVault -VaultName $KeyVaultName -SecretName "LocalAdminPassword"
+    $domainPassword = Get-SecurePasswordFromKeyVault -VaultName $KeyVaultName -SecretName "DomainPassword"
+    $adAdminPassword = Get-SecurePasswordFromKeyVault -VaultName $KeyVaultName -SecretName "ADAdminPassword"
+
+    if ($null -in @($localPassword, $domainPassword, $adAdminPassword)) {
+        throw "Failed to retrieve all required passwords from Key Vault"
+    }
+
+    # Create credential objects
+    $localCred = New-Object System.Management.Automation.PSCredential ($LocalUsername, $localPassword)
+    $domainCred = New-Object System.Management.Automation.PSCredential ($DomainUsername, $domainPassword)
+    $adAdminCred = New-Object System.Management.Automation.PSCredential ($ADAdminUsername, $adAdminPassword)
+
+    # Read inventory file
+    $servers = Get-Content $InventoryFile
+
+    foreach ($server in $servers) {
+        Write-Host "Processing server: $server"
+        
+        # Establish a remote session
+        $session = New-PSSession -ComputerName $server -Credential $localCred
+
+        # Execute remote commands
+        Invoke-Command -Session $session -ScriptBlock {
+            param($DomainName, $ADGroups, $domainCred, $adAdminCred)
+
+            Add-ServerToDomain -DomainName $DomainName -Credential $domainCred
+            Add-ADGroupsToLocalGroups -Groups $ADGroups -Credential $adAdminCred
+            Set-ServerTimeZone
+            Copy-SnowDiscoveryFolder -SourcePath "\\jumphost\SnowDiscovery" -DestinationPath "C:\Windows\System32\WindowsPowerShellv1.0\Modules\"
+            $snowConfig = Configure-SnowDiscovery
+
+            # Generate report
+            $report = @{
+                ServerName = $env:COMPUTERNAME
+                DomainJoined = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
+                TimeZone = (Get-TimeZone).Id
+                SnowDiscoveryConfigured = ($null -ne $snowConfig)
+            }
+
+            return $report
+        } -ArgumentList $DomainName, $ADGroups, $domainCred, $adAdminCred
+
+        # Close the remote session
+        Remove-PSSession $session
+
+        # Reboot the server
+        Restart-Computer -ComputerName $server -Force -Wait -For PowerShell -Timeout 300 -Delay 2
+    }
+
+    Write-Host "Post-build activities completed successfully for all servers."
+}
+catch {
+    Write-Error "An error occurred during script execution: $_"
+}
+
+```
+
+This PowerShell script automates the post-build activities for new Windows servers in Azure. Here's a breakdown of the script and some best practices:
+
+1. Prerequisites:
+   - The script uses parameters for usernames, domain name, AD groups, and inventory file.
+   - Passwords are retrieved securely from Azure Key Vault.
+
+2. Security:
+   - Passwords are never stored in plain text.
+   - The script uses PowerShell's SecureString and PSCredential objects to handle sensitive information.
+   - Azure Key Vault is used to store and retrieve secrets.
+
+3. Modularity:
+   - The script is broken down into functions for each major task, improving readability and maintainability.
+
+4. Error Handling:
+   - Each function includes try-catch blocks to handle errors gracefully.
+   - Errors are logged using Write-Error for easy troubleshooting.
+
+5. Inventory Management:
+   - The script reads server names from an inventory file, allowing for easy scaling and management.
+
+6. Remote Execution:
+   - The script uses PowerShell remoting to execute commands on the target servers.
+
+7. Reporting:
+   - A simple report is generated for each server, which can be expanded as needed.
+
+To use this script:
+
+1. Ensure you have the necessary Azure PowerShell modules installed and are authenticated to your Azure account.
+2. Create an inventory file with the list of server names or IP addresses.
+3. Store the required passwords in Azure Key Vault.
+4. Run the script with the required parameters.
+
+Example usage:
+
+```powershell
+.\PostBuildScript.ps1 -LocalUsername "localadmin" -DomainUsername "domainadmin" -ADAdminUsername "adadmin" -KeyVaultName "mykeyvault" -DomainName "contoso.com" -ADGroups @("Group1", "Group2") -InventoryFile "C:\servers.txt"
+```
+
+Suggestions for improvement:
+
+1. Implement logging to a file for better traceability.
+2. Add more error handling and retries for network-related operations.
+3. Consider using Azure Automation or Azure DevOps for orchestration and scheduling.
+4. Implement parallel execution for multiple servers to improve performance.
+5. Add input validation for parameters to ensure all required information is provided.
+
+Remember to test this script thoroughly in a non-production environment before using it in production. Also, ensure that the accounts used have the necessary permissions to perform these operations.
