@@ -1,0 +1,165 @@
+Certainly, I understand your requirements. Let's adjust the script to use only private IPs in the inventory, remove the CSV header, and implement a more secure, interactive way to input the AD Admin password.
+
+Here's the updated version of the script:
+
+
+
+```powershell
+# Post-Build Automation Script for Windows Servers
+
+# Import required modules
+Import-Module ActiveDirectory
+
+# Define variables
+$DomainName = "example.com"
+$ADGroups = @{
+    "Administrators" = @("Group1", "Group2")
+    "Remote Desktop Users" = @("Group3", "Group4")
+    "Remote Management Users" = @("Group5", "Group6")
+}
+$InventoryFile = "C:\Path\To\InventoryFile.txt"
+$SnowDiscoverySourcePath = "\\JumpHost\Path\To\SnowDiscovery"
+$SnowDiscoveryDestPath = "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\SnowDiscovery"
+$ReportPath = "\\JumpHost\Path\To\Reports"
+
+# Function to securely get credentials
+function Get-SecureCredentials {
+    param (
+        [string]$Username,
+        [string]$KeyVaultName,
+        [string]$SecretName
+    )
+    
+    # In a real scenario, use Azure PowerShell cmdlets to fetch secrets from Key Vault
+    # For demonstration, we're using a placeholder function
+    $securePassword = ConvertTo-SecureString "PlaceholderPassword" -AsPlainText -Force
+    return New-Object System.Management.Automation.PSCredential($Username, $securePassword)
+}
+
+# Get credentials
+$LocalAdminCred = Get-SecureCredentials -Username "LocalAdmin" -KeyVaultName "MyKeyVault" -SecretName "LocalAdminPassword"
+$DomainAdminCred = Get-SecureCredentials -Username "DomainAdmin" -KeyVaultName "MyKeyVault" -SecretName "DomainAdminPassword"
+
+# Securely input AD Admin credentials
+$ADAdminUsername = Read-Host "Enter AD Admin username"
+$ADAdminPassword = Read-Host "Enter AD Admin password" -AsSecureString
+$ADAdminCred = New-Object System.Management.Automation.PSCredential($ADAdminUsername, $ADAdminPassword)
+
+# Read inventory file (containing only private IPs, one per line)
+$Servers = Get-Content $InventoryFile
+
+foreach ($ServerIP in $Servers) {
+    try {
+        # Establish remote session using private IP
+        $Session = New-PSSession -ComputerName $ServerIP -Credential $LocalAdminCred
+
+        # 1. Check and add to domain if necessary
+        Invoke-Command -Session $Session -ScriptBlock {
+            param($DomainName, $DomainAdminCred)
+            if ((Get-WmiObject Win32_ComputerSystem).Domain -ne $DomainName) {
+                Add-Computer -DomainName $DomainName -Credential $DomainAdminCred -Restart
+            }
+        } -ArgumentList $DomainName, $DomainAdminCred
+
+        # 2. Add AD groups to local groups
+        Invoke-Command -Session $Session -ScriptBlock {
+            param($ADGroups, $ADAdminCred)
+            foreach ($LocalGroup in $ADGroups.Keys) {
+                foreach ($ADGroup in $ADGroups[$LocalGroup]) {
+                    Add-LocalGroupMember -Group $LocalGroup -Member $ADGroup -Credential $ADAdminCred -ErrorAction SilentlyContinue
+                }
+            }
+        } -ArgumentList $ADGroups, $ADAdminCred
+
+        # 3. Set time zone
+        Invoke-Command -Session $Session -ScriptBlock {
+            Set-TimeZone -Id "GMT Standard Time"
+        }
+
+        # 4. Copy Snow Discovery folder
+        Copy-Item -Path $SnowDiscoverySourcePath -Destination $SnowDiscoveryDestPath -ToSession $Session -Recurse
+
+        # 5. Run Snow Discovery PowerShell script
+        Invoke-Command -Session $Session -ScriptBlock {
+            Import-Module SnowDiscovery
+            # Run Snow Discovery script (replace with actual command)
+            # Invoke-SnowDiscovery
+        }
+
+        # 6. Generate report
+        $Report = Invoke-Command -Session $Session -ScriptBlock {
+            # Generate report (replace with actual report generation logic)
+            return "Report for $env:COMPUTERNAME"
+        }
+        $Report | Out-File -FilePath "$ReportPath\$ServerIP-Report.txt"
+
+        # 7. Reboot server
+        Restart-Computer -ComputerName $ServerIP -Force -Wait -For PowerShell -Timeout 300 -Delay 2
+
+        Write-Host "Post-build activities completed successfully for $ServerIP"
+    }
+    catch {
+        Write-Error "Error occurred while processing $ServerIP: $_"
+    }
+    finally {
+        # Close the remote session
+        if ($Session) {
+            Remove-PSSession $Session
+        }
+    }
+}
+
+```
+
+Key changes and explanations:
+
+1. **Simplified Inventory File**:
+   The inventory file is now a simple text file with one IP address per line, without any header. We've changed how we read the file:
+
+   ```powershell
+   $InventoryFile = "C:\Path\To\InventoryFile.txt"
+   $Servers = Get-Content $InventoryFile
+   ```
+
+   Your inventory file should now look like this:
+   ```
+   10.0.0.1
+   10.0.0.2
+   10.0.0.3
+   ```
+
+2. **Secure, Interactive AD Admin Password Input**:
+   We're using `Read-Host` with the `-AsSecureString` parameter to securely input the AD Admin password at runtime:
+
+   ```powershell
+   $ADAdminUsername = Read-Host "Enter AD Admin username"
+   $ADAdminPassword = Read-Host "Enter AD Admin password" -AsSecureString
+   $ADAdminCred = New-Object System.Management.Automation.PSCredential($ADAdminUsername, $ADAdminPassword)
+   ```
+
+   This approach:
+   - Prompts the user for the password when the script runs
+   - Masks the password input on the screen
+   - Stores the password as a SecureString, which is more secure than plaintext
+
+3. **Using Private IPs**:
+   The script now directly uses the IP addresses from the inventory file:
+
+   ```powershell
+   foreach ($ServerIP in $Servers) {
+       # Establish remote session using private IP
+       $Session = New-PSSession -ComputerName $ServerIP -Credential $LocalAdminCred
+       # ... rest of the script
+   }
+   ```
+
+These changes make the script more straightforward to use with a simple list of IP addresses and enhance security by interactively prompting for the AD Admin password at runtime.
+
+Remember to adjust the paths, domain names, and group names to match your specific environment. Also, ensure that the jump host has network access to the private IPs of the new servers.
+
+For production use, consider implementing additional security measures such as:
+1. Encrypting the inventory file when not in use.
+2. Using Just Enough Administration (JEA) to limit the actions that can be performed with the provided credentials.
+3. Implementing logging and auditing to track all actions performed by the script.
+
+Always test thoroughly in a non-production environment before using in production.
