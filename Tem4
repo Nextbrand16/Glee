@@ -1,0 +1,75 @@
+I'll help you create a PowerShell script to retrieve Organizational Unit (OU) information for multiple servers from Active Directory.
+
+
+
+```powershell
+# Import the Active Directory module
+Import-Module ActiveDirectory
+
+# Array of server names - replace with your server names
+$Servers = @(
+    "SERVER1",
+    "SERVER2",
+    "SERVER3"
+)
+
+# Function to get the OU path for a computer
+function Get-ComputerOU {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$ComputerName
+    )
+    
+    try {
+        $computer = Get-ADComputer -Identity $ComputerName -Properties CanonicalName -ErrorAction Stop
+        $result = [PSCustomObject]@{
+            ServerName = $ComputerName
+            OUPath = ($computer.DistinguishedName -split ',', 2)[1]
+            CanonicalName = $computer.CanonicalName
+            Status = "Success"
+        }
+    }
+    catch {
+        $result = [PSCustomObject]@{
+            ServerName = $ComputerName
+            OUPath = "Not Found"
+            CanonicalName = "Not Found"
+            Status = "Error: $($_.Exception.Message)"
+        }
+    }
+    
+    return $result
+}
+
+# Array to store results
+$Results = @()
+
+# Process each server
+foreach ($Server in $Servers) {
+    $Results += Get-ComputerOU -ComputerName $Server
+}
+
+# Display results in a formatted table
+$Results | Format-Table -AutoSize
+
+# Export results to CSV
+$Results | Export-Csv -Path "ServerOUReport.csv" -NoTypeInformation
+
+```
+
+To use this script:
+
+1. Replace the server names in the `$Servers` array with your actual server names
+2. The script will:
+   - Get both the Distinguished Name and Canonical Name for each server
+   - Handle errors gracefully if a server isn't found
+   - Display results in a formatted table
+   - Export results to a CSV file named "ServerOUReport.csv"
+
+The output will include:
+- Server name
+- OU path
+- Canonical name
+- Status (Success or Error message)
+
+Would you like me to modify the script to include additional information or change the output format?
