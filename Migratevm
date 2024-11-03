@@ -1,0 +1,267 @@
+I'll modify the script to include data disk migration.
+
+
+
+```powershell
+# Parameters for source environment
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$SourceSubscriptionId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetSubscriptionId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$SourceResourceGroupName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetResourceGroupName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$VMName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetVNetName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetSubnetName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Location
+)
+
+# Function to handle errors
+function Handle-Error {
+    param($ErrorMessage)
+    Write-Error "Error: $ErrorMessage"
+    exit 1
+}
+
+# Function to create disk snapshot
+function Create-DiskSnapshot {
+    param(
+        $DiskName,
+        $ResourceGroupName,
+        $Location,
+        $DiskId
+    )
+    $snapshotConfig = New-AzSnapshotConfig -Location $Location -CreateOption Copy -SourceUri $DiskId
+    $snapshotName = "$DiskName-Snapshot"
+    return New-AzSnapshot -ResourceGroupName $ResourceGroupName -SnapshotName $snapshotName -Snapshot $snapshotConfig
+}
+
+try {
+    # Login to Azure (if not already logged in)
+    Write-Host "Checking Azure connection..."
+    $context = Get-AzContext
+    if (!$context) {
+        Connect-AzAccount
+    }
+
+    # Switch to source subscription
+    Write-Host "Switching to source subscription..."
+    Set-AzContext -SubscriptionId $SourceSubscriptionId
+
+    # Get the source VM
+    Write-Host "Getting source VM details..."
+    $sourceVM = Get-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName
+    if (!$sourceVM) {
+        Handle-Error "Source VM not found"
+    }
+
+    # Stop and deallocate the VM
+    Write-Host "Stopping the VM..."
+    Stop-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName -Force
+
+    # Get the OS disk
+    $osDisk = Get-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $sourceVM.StorageProfile.OsDisk.Name
+
+    # Get all data disks
+    Write-Host "Getting data disk details..."
+    $dataDisks = @()
+    foreach ($dataDisk in $sourceVM.StorageProfile.DataDisks) {
+        $disk = Get-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $dataDisk.Name
+        $dataDisks += @{
+            'Disk' = $disk
+            'Lun' = $dataDisk.Lun
+            'CachingMode' = $dataDisk.Caching
+        }
+    }
+
+    # Create snapshot of OS disk
+    Write-Host "Creating snapshot of OS disk..."
+    $osSnapshot = Create-DiskSnapshot -DiskName "$VMName-OS" -ResourceGroupName $SourceResourceGroupName -Location $Location -DiskId $osDisk.Id
+
+    # Create snapshots of data disks
+    Write-Host "Creating snapshots of data disks..."
+    $dataSnapshots = @()
+    foreach ($dataDisk in $dataDisks) {
+        $snapshot = Create-DiskSnapshot -DiskName $dataDisk.Disk.Name -ResourceGroupName $SourceResourceGroupName -Location $Location -DiskId $dataDisk.Disk.Id
+        $dataSnapshots += @{
+            'Snapshot' = $snapshot
+            'Lun' = $dataDisk.Lun
+            'CachingMode' = $dataDisk.CachingMode
+        }
+    }
+
+    # Switch to target subscription
+    Write-Host "Switching to target subscription..."
+    Set-AzContext -SubscriptionId $TargetSubscriptionId
+
+    # Create new resource group if it doesn't exist
+    $targetRG = Get-AzResourceGroup -Name $TargetResourceGroupName -ErrorAction SilentlyContinue
+    if (!$targetRG) {
+        Write-Host "Creating target resource group..."
+        New-AzResourceGroup -Name $TargetResourceGroupName -Location $Location
+    }
+
+    # Create new OS disk from snapshot
+    Write-Host "Creating new OS disk in target subscription..."
+    $diskConfig = New-AzDiskConfig -Location $Location -CreateOption Copy -SourceResourceId $osSnapshot.Id
+    $newOSDiskName = "$VMName-OS-Disk"
+    $newOSDisk = New-AzDisk -ResourceGroupName $TargetResourceGroupName -DiskName $newOSDiskName -Disk $diskConfig
+
+    # Create new data disks from snapshots
+    Write-Host "Creating new data disks in target subscription..."
+    $newDataDisks = @()
+    foreach ($dataSnapshot in $dataSnapshots) {
+        $diskConfig = New-AzDiskConfig -Location $Location -CreateOption Copy -SourceResourceId $dataSnapshot.Snapshot.Id
+        $newDataDiskName = "$($dataSnapshot.Snapshot.Name)-Disk"
+        $newDisk = New-AzDisk -ResourceGroupName $TargetResourceGroupName -DiskName $newDataDiskName -Disk $diskConfig
+        $newDataDisks += @{
+            'Disk' = $newDisk
+            'Lun' = $dataSnapshot.Lun
+            'CachingMode' = $dataSnapshot.CachingMode
+        }
+    }
+
+    # Get target virtual network and subnet
+    Write-Host "Getting target network information..."
+    $targetVNet = Get-AzVirtualNetwork -Name $TargetVNetName -ResourceGroupName $TargetResourceGroupName
+    $targetSubnet = $targetVNet.Subnets | Where-Object { $_.Name -eq $TargetSubnetName }
+
+    # Create new NIC
+    Write-Host "Creating new network interface..."
+    $nicName = "$VMName-nic"
+    $ipConfig = New-AzNetworkInterfaceIpConfig -Name "IPConfig1" -SubnetId $targetSubnet.Id -Primary
+    $nic = New-AzNetworkInterface -Name $nicName -ResourceGroupName $TargetResourceGroupName -Location $Location -IpConfiguration $ipConfig
+
+    # Create new VM configuration
+    Write-Host "Creating new VM configuration..."
+    $newVM = New-AzVMConfig -VMName $VMName -VMSize $sourceVM.HardwareProfile.VmSize
+    $newVM = Set-AzVMOSDisk -VM $newVM -ManagedDiskId $newOSDisk.Id -CreateOption Attach -Windows
+
+    # Attach data disks
+    Write-Host "Attaching data disks to new VM configuration..."
+    foreach ($newDataDisk in $newDataDisks) {
+        $newVM = Add-AzVMDataDisk -VM $newVM -ManagedDiskId $newDataDisk.Disk.Id -Lun $newDataDisk.Lun -CreateOption Attach -Caching $newDataDisk.CachingMode
+    }
+
+    # Add network interface
+    $newVM = Add-AzVMNetworkInterface -VM $newVM -Id $nic.Id
+
+    # Create the new VM
+    Write-Host "Creating new VM in target subscription..."
+    New-AzVM -ResourceGroupName $TargetResourceGroupName -Location $Location -VM $newVM
+
+    # Clean up source resources (optional - uncomment if needed)
+    # Write-Host "Cleaning up source resources..."
+    # Remove-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName -Force
+    # Remove-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $osDisk.Name -Force
+    # Remove-AzSnapshot -ResourceGroupName $SourceResourceGroupName -SnapshotName $osSnapshot.Name -Force
+    # foreach ($dataSnapshot in $dataSnapshots) {
+    #     Remove-AzSnapshot -ResourceGroupName $SourceResourceGroupName -SnapshotName $dataSnapshot.Snapshot.Name -Force
+    # }
+    # foreach ($dataDisk in $dataDisks) {
+    #     Remove-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $dataDisk.Disk.Name -Force
+    # }
+
+    Write-Host "Migration completed successfully!"
+}
+catch {
+    Handle-Error $_.Exception.Message
+}
+
+```
+
+Key changes made to the script:
+
+1. Added data disk handling:
+   - Gets all data disks attached to the source VM
+   - Creates snapshots of all data disks
+   - Creates new data disks in target subscription
+   - Attaches data disks to new VM with same LUN and caching settings
+
+2. Added helper function `Create-DiskSnapshot` to reduce code duplication
+
+3. Enhanced the cleanup section (commented out by default) to include data disk cleanup
+
+4. Maintains original disk configurations:
+   - Preserves LUN numbers
+   - Preserves caching settings
+   - Maintains disk order
+
+This script performs a complete VM migration between subscriptions. Here's how to use it:
+
+Save the script as Migrate-AzureVM.ps1
+Run it with parameters like this:
+
+```powershell
+.\Migrate-AzureVM.ps1 `
+    -SourceSubscriptionId "source-sub-id" `
+    -TargetSubscriptionId "target-sub-id" `
+    -SourceResourceGroupName "source-rg" `
+    -TargetResourceGroupName "target-rg" `
+    -VMName "your-vm-name" `
+    -TargetVNetName "target-vnet" `
+    -TargetSubnetName "target-subnet" `
+    -Location "eastus"
+```
+
+The script now handles both OS and data disks while maintaining all their configurations.
+
+Migrate Azure VM Between Subscriptions with IP Reassignment
+
+
+
+A
+To migrate an Azure Virtual Machine (VM) from one subscription to another using PowerShell. Assign new IP in the target subscription.
+
+
+I'll help you create a PowerShell script to migrate an Azure VM between subscriptions, including IP reassignment.
+
+
+Azure VM Migration Script
+Click to open code
+This script performs a complete VM migration between subscriptions. Here's how to use it:
+
+Save the script as Migrate-AzureVM.ps1
+Run it with parameters like this:
+powershell
+
+Copy
+.\Migrate-AzureVM.ps1 `
+    -SourceSubscriptionId "source-sub-id" `
+    -TargetSubscriptionId "target-sub-id" `
+    -SourceResourceGroupName "source-rg" `
+    -TargetResourceGroupName "target-rg" `
+    -VMName "your-vm-name" `
+    -TargetVNetName "target-vnet" `
+    -TargetSubnetName "target-subnet" `
+    -Location "eastus"
+The script:
+
+Stops the source VM
+Creates a snapshot of the OS disk
+Creates a new disk in the target subscription
+Sets up new networking with a new IP address
+Creates a new VM in the target subscription
+Includes error handling and progress messages
+Has optional cleanup steps (commented out by default)
+Important notes:
+
+Ensure you have sufficient permissions in both subscriptions
+The script assumes a Windows VM (modify the OS disk attachment for Linux)
+Remember to clean up source resources if no longer needed
+Test in a non-production environment first
+Consider any domain join or custom configuration requirements post-migration
