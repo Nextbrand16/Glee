@@ -1,0 +1,256 @@
+Sure, I can modify the script to list the encryption status of all disks attached to the VM and then disable encryption before creating the snapshots. Here's the updated script:
+
+```powershell
+# Parameters for source environment
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$SourceSubscriptionId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetSubscriptionId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$SourceResourceGroupName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetResourceGroupName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$VMName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetVNetName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetSubnetName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Location,
+
+    [Parameter(Mandatory=$true)]
+    [string]$TargetIPAddress
+)
+
+# Function to handle errors
+function Handle-Error {
+    param($ErrorMessage)
+    Write-Error "Error: $ErrorMessage"
+    exit 1
+}
+
+# Function to create disk snapshot
+function Create-DiskSnapshot {
+    param(
+        $DiskName,
+        $ResourceGroupName,
+        $Location,
+        $DiskId
+    )
+    $snapshotConfig = New-AzSnapshotConfig -Location $Location -CreateOption Copy -SourceUri $DiskId
+    $snapshotName = "$DiskName-Snapshot"
+    return New-AzSnapshot -ResourceGroupName $ResourceGroupName -SnapshotName $snapshotName -Snapshot $snapshotConfig
+}
+
+try {
+    # Login to Azure (if not already logged in)
+    Write-Host "Checking Azure connection..."
+    $context = Get-AzContext
+    if (!$context) {
+        Connect-AzAccount
+    }
+
+    # Switch to source subscription
+    Write-Host "Switching to source subscription..."
+    Set-AzContext -SubscriptionId $SourceSubscriptionId
+
+    # Get the source VM
+    Write-Host "Getting source VM details..."
+    $sourceVM = Get-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName
+    if (!$sourceVM) {
+        Handle-Error "Source VM not found"
+    }
+
+    # Stop and deallocate the VM
+    Write-Host "Stopping the VM..."
+    Stop-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName -Force
+
+    # Get the OS disk encryption status
+    Write-Host "Checking OS disk encryption status..."
+    $osDiskEncryption = Get-AzVMDiskEncryptionStatus -ResourceGroupName $SourceResourceGroupName -VMName $VMName
+    if ($osDiskEncryption.OsDiskEncrypted) {
+        Write-Host "OS disk is encrypted with a platform-managed key"
+    }
+    else {
+        Write-Host "OS disk is not encrypted"
+    }
+
+    # Get all data disks and their encryption status
+    Write-Host "Checking data disk encryption status..."
+    $dataDisks = @()
+    foreach ($dataDisk in $sourceVM.StorageProfile.DataDisks) {
+        $disk = Get-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $dataDisk.Name
+        $dataDisks += @{
+            'Disk' = $disk
+            'Lun' = $dataDisk.Lun
+            'CachingMode' = $dataDisk.Caching
+            'Encrypted' = $disk.Encryption.Type -ne 'None'
+        }
+    }
+
+    # Disable encryption on all disks
+    Write-Host "Disabling encryption on all disks..."
+    Disable-AzVMDiskEncryption -ResourceGroupName $SourceResourceGroupName -VMName $VMName -Force
+
+    # Create snapshot of OS disk
+    Write-Host "Creating snapshot of OS disk..."
+    $osSnapshot = Create-DiskSnapshot -DiskName "$VMName-OS" -ResourceGroupName $SourceResourceGroupName -Location $Location -DiskId $osDisk.Id
+
+    # Create snapshots of data disks
+    Write-Host "Creating snapshots of data disks..."
+    $dataSnapshots = @()
+    foreach ($dataDisk in $dataDisks) {
+        $snapshot = Create-DiskSnapshot -DiskName $dataDisk.Disk.Name -ResourceGroupName $SourceResourceGroupName -Location $Location -DiskId $dataDisk.Disk.Id
+        $dataSnapshots += @{
+            'Snapshot' = $snapshot
+            'Lun' = $dataDisk.Lun
+            'CachingMode' = $dataDisk.CachingMode
+            'Encrypted' = $dataDisk.Encrypted
+        }
+    }
+
+    # Switch to target subscription
+    Write-Host "Switching to target subscription..."
+    Set-AzContext -SubscriptionId $TargetSubscriptionId
+
+    # Create new resource group if it doesn't exist
+    $targetRG = Get-AzResourceGroup -Name $TargetResourceGroupName -ErrorAction SilentlyContinue
+    if (!$targetRG) {
+        Write-Host "Creating target resource group..."
+        New-AzResourceGroup -Name $TargetResourceGroupName -Location $Location
+    }
+
+    # Create new OS disk from snapshot
+    Write-Host "Creating new OS disk in target subscription..."
+    $diskConfig = New-AzDiskConfig -Location $Location -CreateOption Copy -SourceResourceId $osSnapshot.Id
+    if ($osDiskEncryption.OsDiskEncrypted) {
+        Write-Host "Applying platform-managed encryption to new OS disk..."
+        $encryptionSetName = "$VMName-EncryptionSet"
+        $encryptionSet = New-AzDiskEncryptionSet -Name $encryptionSetName -ResourceGroupName $TargetResourceGroupName -Location $Location -SourceVaultId $osDiskEncryption.OsDiskEncryptionSetId
+        $diskConfig = Set-AzDiskDiskEncryptionSet -DiskEncryptionSetId $encryptionSet.Id -DiskConfig $diskConfig
+    }
+    $newOSDiskName = "$VMName-OS-Disk"
+    $newOSDisk = New-AzDisk -ResourceGroupName $TargetResourceGroupName -DiskName $newOSDiskName -Disk $diskConfig
+
+    # Create new data disks from snapshots
+    Write-Host "Creating new data disks in target subscription..."
+    $newDataDisks = @()
+    foreach ($dataSnapshot in $dataSnapshots) {
+        $diskConfig = New-AzDiskConfig -Location $Location -CreateOption Copy -SourceResourceId $dataSnapshot.Snapshot.Id
+        if ($dataSnapshot.Encrypted) {
+            Write-Host "Applying platform-managed encryption to new data disk..."
+            $encryptionSetName = "$($dataSnapshot.Snapshot.Name)-EncryptionSet"
+            $encryptionSet = New-AzDiskEncryptionSet -Name $encryptionSetName -ResourceGroupName $TargetResourceGroupName -Location $Location -SourceVaultId $osDiskEncryption.OsDiskEncryptionSetId
+            $diskConfig = Set-AzDiskDiskEncryptionSet -DiskEncryptionSetId $encryptionSet.Id -DiskConfig $diskConfig
+        }
+        $newDataDiskName = "$($dataSnapshot.Snapshot.Name)-Disk"
+        $newDisk = New-AzDisk -ResourceGroupName $TargetResourceGroupName -DiskName $newDataDiskName -Disk $diskConfig
+        $newDataDisks += @{
+            'Disk' = $newDisk
+            'Lun' = $dataSnapshot.Lun
+            'CachingMode' = $dataSnapshot.CachingMode
+            'Encrypted' = $dataSnapshot.Encrypted
+        }
+    }
+
+    # Get target virtual network and subnet
+    Write-Host "Getting target network information..."
+    $targetVNet = Get-AzVirtualNetwork -Name $TargetVNetName -ResourceGroupName $TargetResourceGroupName
+    $targetSubnet = $targetVNet.Subnets | Where-Object { $_.Name -eq $TargetSubnetName }
+
+    # Create new NIC with static IP
+    Write-Host "Creating new network interface with static IP $TargetIPAddress..."
+    $nicName = "$VMName-nic"
+    $ipConfig = New-AzNetworkInterfaceIpConfig -Name "IPConfig1" `
+        -SubnetId $targetSubnet.Id `
+        -PrivateIpAddress $TargetIPAddress `
+        -Primary
+
+    $nic = New-AzNetworkInterface -Name $nicName `
+        -ResourceGroupName $TargetResourceGroupName `
+        -Location $Location `
+        -IpConfiguration $ipConfig
+
+    # Create new VM configuration
+    Write-Host "Creating new VM configuration..."
+    $newVM = New-AzVMConfig -VMName $VMName -VMSize $sourceVM.HardwareProfile.VmSize
+    $newVM = Set-AzVMOSDisk -VM $newVM -ManagedDiskId $newOSDisk.Id -CreateOption Attach -Windows
+
+    # Attach data disks
+    Write-Host "Attaching data disks to new VM configuration..."
+    foreach ($newDataDisk in $newDataDisks) {
+        $newVM = Add-AzVMDataDisk -VM $newVM -ManagedDiskId $newDataDisk.Disk.Id -Lun $newDataDisk.Lun -CreateOption Attach -Caching $newDataDisk.CachingMode
+    }
+
+    # Add network interface
+    $newVM = Add-AzVMNetworkInterface -VM $newVM -Id $nic.Id
+
+    # Create the new VM
+    Write-Host "Creating new VM in target subscription..."
+    New-AzVM -ResourceGroupName $TargetResourceGroupName -Location $Location -VM $newVM
+
+    # Clean up source resources (optional - uncomment if needed)
+    # Write-Host "Cleaning up source resources..."
+    # Remove-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName -Force
+    # Remove-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $osDisk.Name -Force
+    # Remove-AzSnapshot -ResourceGroupName $SourceResourceGroupName -SnapshotName $osSnapshot.Name -Force
+    # foreach ($dataSnapshot in $dataSnapshots) {
+    #     Remove-AzSnapshot -ResourceGroupName $SourceResourceGroupName -SnapshotName $dataSnapshot.Snapshot.Name -Force
+    # }
+    # foreach ($dataDisk in $dataDisks) {
+    #     Remove-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $dataDisk.Disk.Name -Force
+    # }
+
+    Write-Host "Migration completed successfully with IP address $TargetIPAddress!"
+}
+catch {
+    Handle-Error $_.Exception.Message
+}
+
+```
+
+The key changes in this updated script are:
+
+1. Added checks to determine the encryption status of the OS and data disks:
+   - Checked the OS disk encryption status using `Get-AzVMDiskEncryptionStatus`.
+   - Looped through the data disks and checked the encryption status of each disk.
+   - Stored the encryption status in the `$dataDisks` array.
+
+2. Disabled encryption on all disks before creating the snapshots:
+   - Used `Disable-AzVMDiskEncryption` to disable encryption on the entire VM.
+
+3. When creating the new disks in the target subscription:
+   - For the OS disk, if it was encrypted, created a new encryption set in the target subscription with the same encryption set ID.
+   - For the data disks, if they were encrypted, created a new encryption set in the target subscription and applied it to the new data disks.
+
+The rest of the script remains the same as the previous version. This updated script will:
+
+1. Check the encryption status of all disks attached to the source VM.
+2. Disable encryption on all disks before creating the snapshots.
+3. Create the new disks in the target subscription and apply the same encryption settings as the source disks.
+
+The usage of the script remains the same:
+
+```powershell
+.\Migrate-AzureVM-Encrypted.ps1 `
+    -SourceSubscriptionId "source-sub-id" `
+    -TargetSubscriptionId "target-sub-id" `
+    -SourceResourceGroupName "source-rg" `
+    -TargetResourceGroupName "target-rg" `
+    -VMName "your-vm-name" `
+    -TargetVNetName "target-vnet" `
+    -TargetSubnetName "target-subnet" `
+    -Location "eastus" `
+    -TargetIPAddress "10.0.0.10"
+```
+
+Let me know if you have any further questions or need additional modifications to the script.
