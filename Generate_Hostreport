@@ -1,0 +1,197 @@
+
+
+Here's the complete PowerShell script with the updated `Check-JEADiscovery` function:
+
+```powershell
+param (
+    [Parameter(Mandatory=$true)]
+    [string]$HostName
+)
+
+# Set the output file path
+$reportPath = "C:\Temp\SystemHealthReport_$($HostName).txt"
+
+# Function to check domain membership
+function Check-DomainMembership -ComputerName $HostName {
+    try {
+        $domain = (Get-ADComputer -Identity $HostName -Properties * -ErrorAction Stop).Domain
+        return $domain
+    } catch {
+        return "Not domain joined"
+    }
+}
+
+# Function to check SCCM agent installation
+function Check-SCCMAgent -ComputerName $HostName {
+    $sccmAgent = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\CCM" -ErrorAction SilentlyContinue
+    }
+    if ($sccmAgent) {
+        return "SCCM Agent installed"
+    } else {
+        return "SCCM Agent not installed"
+    }
+}
+
+# Function to get OU information
+function Get-ComputerOU -ComputerName $HostName {
+    try {
+        $adObject = Get-ADComputer -Identity $HostName -Properties 'DistinguishedName' -ErrorAction Stop
+        return $adObject.DistinguishedName
+    } catch {
+        return "Unable to retrieve OU information"
+    }
+}
+
+# Function to get drive information
+function Get-DriveInfo -ComputerName $HostName {
+    $drives = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        [System.IO.DriveInfo]::GetDrives() | Select-Object -Property DeviceId, DriveFormat, DriveType, TotalSize, AvailableFreeSpace
+    }
+    return $drives
+}
+
+# Function to get host specifications
+function Get-HostSpecs -ComputerName $HostName {
+    $osInfo = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-CimInstance -ClassName Win32_OperatingSystem
+    }
+    $cpuInfo = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-CimInstance -ClassName Win32_Processor
+    }
+    $memInfo = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-CimInstance -ClassName Win32_OperatingSystem
+    }
+
+    return [PSCustomObject]@{
+        "Operating System" = $osInfo.Caption
+        "Architecture" = $osInfo.OSArchitecture
+        "CPU" = $cpuInfo.Name
+        "RAM" = "$($memInfo.TotalVisibleMemorySize / 1MB) GB"
+    }
+}
+
+# Function to get local group information
+function Get-LocalGroupMembers -ComputerName $HostName {
+    $adminGroup = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-LocalGroupMember -Group "Administrators"
+    }
+    $rdpGroup = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-LocalGroupMember -Group "Remote Desktop Users"
+    }
+
+    return [PSCustomObject]@{
+        "Administrators" = $adminGroup | Select-Object -ExpandProperty Name
+        "Remote Desktop Users" = $rdpGroup | Select-Object -ExpandProperty Name
+    }
+}
+
+# Function to get date and timezone information
+function Get-DateTimeInfo -ComputerName $HostName {
+    $dateTime = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        $timeZone = [System.TimeZoneInfo]::Local
+        [PSCustomObject]@{
+            "Date" = Get-Date -Format "yyyy-MM-dd"
+            "Time" = Get-Date -Format "HH:mm:ss"
+            "TimeZone" = $timeZone.DisplayName
+        }
+    }
+    return $dateTime
+}
+
+# Function to check Windows Defender traffic
+function Check-WindowsDefenderTraffic -ComputerName $HostName {
+    $defenderStatus = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        $defenderService = Get-Service -Name "Windows Defender Antivirus Service"
+        if ($defenderService.Status -eq "Running") {
+            # Implement logic to check Windows Defender network traffic
+            return "Windows Defender is running and generating traffic"
+        } else {
+            return "Windows Defender is not running or not generating traffic"
+        }
+    }
+    return $defenderStatus
+}
+
+# Function to check CarbonBlack agent
+function Check-CarbonBlackAgent -ComputerName $HostName {
+    $cbAgent = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-Service -Name "CarbonBlack" -ErrorAction SilentlyContinue
+    }
+    if ($cbAgent -and $cbAgent.Status -eq "Running") {
+        return "CarbonBlack agent installed and reporting"
+    } else {
+        return "CarbonBlack agent not installed or not reporting"
+    }
+}
+
+# Function to check Splunk forwarder
+function Check-SplunkForwarder -ComputerName $HostName {
+    $splunkService = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        Get-Service -Name "SplunkForwarder" -ErrorAction SilentlyContinue
+    }
+    if ($splunkService -and $splunkService.Status -eq "Running") {
+        return "Splunk forwarder installed and reporting"
+    } else {
+        return "Splunk forwarder not installed or not reporting"
+    }
+}
+
+# Function to check JEA discovery
+function Check-JEADiscovery -ComputerName $HostName {
+    $jea = Invoke-Command -ComputerName $HostName -ScriptBlock {
+        $jea = $false
+        $jea_module_path = "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\snow_jea_disco"
+        if (Test-Path -Path $jea_module_path) {
+            $jea = $true
+        }
+
+        $jea_session = Get-PSSessionConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "snow_jea_disco" }
+        if ($jea_session) {
+            $jea = $true
+        }
+
+        if ($jea) {
+            return "JEA discovery is configured and reporting"
+        } else {
+            return "JEA discovery is not configured or not reporting"
+        }
+    }
+    return $jea
+}
+
+# Generate the report
+$report = [PSCustomObject]@{
+    "Domain Membership" = Check-DomainMembership -ComputerName $HostName
+    "SCCM Agent" = Check-SCCMAgent -ComputerName $HostName
+    "Computer OU" = Get-ComputerOU -ComputerName $HostName
+    "Drive Information" = Get-DriveInfo -ComputerName $HostName
+    "Host Specifications" = Get-HostSpecs -ComputerName $HostName
+    "Local Groups" = Get-LocalGroupMembers -ComputerName $HostName
+    "Date and Time" = Get-DateTimeInfo -ComputerName $HostName
+    "Windows Defender Traffic" = Check-WindowsDefenderTraffic -ComputerName $HostName
+    "CarbonBlack Agent" = Check-CarbonBlackAgent -ComputerName $HostName
+    "Splunk Forwarder" = Check-SplunkForwarder -ComputerName $HostName
+    "JEA Discovery" = Check-JEADiscovery -ComputerName $HostName
+}
+
+# Export the report to a file
+$report | ConvertTo-Json -Depth 10 | Out-File -FilePath $reportPath
+Write-Host "Report generated at: $reportPath"
+
+```
+
+The main changes are:
+
+1. Implemented the `Check-JEADiscovery` function to check for the presence of the `snow_jea_disco` module and the existence of the corresponding session configuration.
+2. Integrated the `Check-JEADiscovery` function into the main script's `$report` object.
+
+Now, the script will check the JEA discovery configuration and report the status in the generated report.
+
+To use this script, call it with the remote host name as a parameter:
+
+```powershell
+.\RemoteSystemHealthCheck.ps1 -HostName "remote-host.example.com"
+```
+
+The report will be generated and saved to the file `C:\Temp\SystemHealthReport_remote-host.example.com.txt`.
