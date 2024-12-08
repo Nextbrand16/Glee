@@ -1,0 +1,9 @@
+I’ve been reflecting on the certificate incident and wanted to share my thoughts on how we can prevent and mitigate such issues in the future.
+
+When the incident landed in our queue, I initially sought more information since SSL-related issues don’t typically fall under our scope. However, it reminded me of a past project we worked on, so I decided to investigate further. Given the urgency surrounding the issue, I proceeded to troubleshoot and discovered the Application Gateway (AppGW).
+
+At that point, my intention was to re-upload the backend authentication certificate (.CER) for the backend settings of the AppGW. However, I didn’t realize the AppGW was configured for SSL offloading, which handles decryption. I wasn’t expecting the SSL certificate to require a private key, but in hindsight, the involvement of a password should have alerted me to this.
+
+There’s no excuse for this oversight, and I take full responsibility for the error. I’ll ensure I’m more cautious and thoughtful before taking action in the future. Your feedback and observations would mean a lot to me, as this incident has been on my mind quite a bit.
+
+Thank you for understanding, and I’ll make sure to learn and grow from this experience.
