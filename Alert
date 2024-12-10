@@ -2,7 +2,7 @@ You're right to question that—using resource groups as the scope might not be 
 
 Let's adjust the code to scope the alerts to individual VMs instead of resource groups, which would likely be more relevant in a VM monitoring scenario.
 
-
+kkll
 ---
 
 Updated Module: vm_alerts
