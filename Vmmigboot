@@ -1,0 +1,260 @@
+```powershell
+```powershell
+# Parameters for source environment
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$SourceSubscriptionId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetSubscriptionId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$SourceResourceGroupName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetResourceGroupName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$VMName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetVNetName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$TargetSubnetName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Location,
+
+    [Parameter(Mandatory=$true)]
+    [string]$TargetIPAddress,
+
+    [Parameter(Mandatory=$true)]
+    [int][ValidateRange(1,3)]
+    $AvailabilityZone
+)
+
+# Function to handle errors
+function Handle-Error {
+    param($ErrorMessage)
+    Write-Error "Error: $ErrorMessage"
+    exit 1
+}
+
+# Function to create disk snapshot in target subscription
+function Create-DiskSnapshot {
+    param(
+        $DiskName,
+        $TargetResourceGroupName,
+        $Location,
+        $DiskId
+    )
+    $snapshotConfig = New-AzSnapshotConfig -Location $Location -CreateOption Copy -SourceUri $DiskId
+    $snapshotName = "$DiskName-Snapshot"
+    return New-AzSnapshot -ResourceGroupName $TargetResourceGroupName -SnapshotName $snapshotName -Snapshot $snapshotConfig
+}
+
+try {
+    # Login to Azure (if not already logged in)
+    Write-Host "Checking Azure connection..."
+    $context = Get-AzContext
+    if (!$context) {
+        Connect-AzAccount
+    }
+
+    # Switch to source subscription
+    Write-Host "Switching to source subscription..."
+    Set-AzContext -SubscriptionId $SourceSubscriptionId
+
+    # Get the source VM
+    Write-Host "Getting source VM details..."
+    $sourceVM = Get-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName
+    if (!$sourceVM) {
+        Handle-Error "Source VM not found"
+    }
+
+    # Stop and deallocate the VM
+    Write-Host "Stopping the VM..."
+    Stop-AzVM -ResourceGroupName $SourceResourceGroupName -Name $VMName -Force
+
+    # Get the OS disk encryption status and details
+    Write-Host "Checking OS disk details and encryption status..."
+    $osDiskEncryption = Get-AzVMDiskEncryptionStatus -ResourceGroupName $SourceResourceGroupName -VMName $VMName
+    $osDisk = Get-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $sourceVM.StorageProfile.OsDisk.Name
+
+    # Get all data disks and their encryption status
+    Write-Host "Checking data disk details and encryption status..."
+    $dataDisks = @()
+    foreach ($dataDisk in $sourceVM.StorageProfile.DataDisks) {
+        $disk = Get-AzDisk -ResourceGroupName $SourceResourceGroupName -DiskName $dataDisk.Name
+        $dataDisks += @{
+            'Disk' = $disk
+            'Lun' = $dataDisk.Lun
+            'CachingMode' = $dataDisk.Caching
+            'Encrypted' = $disk.Encryption.Type -ne 'None'
+            'DiskSizeGB' = $dataDisk.DiskSizeGB
+            'ManagedDisk' = $dataDisk.ManagedDisk
+        }
+    }
+
+    # Disable encryption on all disks
+    Write-Host "Disabling encryption on all disks..."
+    Disable-AzVMDiskEncryption -ResourceGroupName $SourceResourceGroupName -VMName $VMName -Force
+
+    # Switch to target subscription to create snapshots
+    Write-Host "Switching to target subscription to create snapshots..."
+    Set-AzContext -SubscriptionId $TargetSubscriptionId
+
+    # Ensure target resource group exists
+    $targetRG = Get-AzResourceGroup -Name $TargetResourceGroupName -ErrorAction SilentlyContinue
+    if (!$targetRG) {
+        Write-Host "Creating target resource group..."
+        New-AzResourceGroup -Name $TargetResourceGroupName -Location $Location
+    }
+
+    # Create snapshot of OS disk directly in target resource group
+    Write-Host "Creating snapshot of OS disk in target subscription..."
+    Set-AzContext -SubscriptionId $SourceSubscriptionId
+    $osSnapshot = Create-DiskSnapshot -DiskName "$VMName-OS" -TargetResourceGroupName $TargetResourceGroupName -Location $Location -DiskId $osDisk.Id
+
+    # Switch back to target subscription
+    Set-AzContext -SubscriptionId $TargetSubscriptionId
+
+    # Create snapshots of data disks in target resource group
+    Write-Host "Creating snapshots of data disks in target subscription..."
+    Set-AzContext -SubscriptionId $SourceSubscriptionId
+    $dataSnapshots = @()
+    foreach ($dataDisk in $dataDisks) {
+        Set-AzContext -SubscriptionId $TargetSubscriptionId
+        $snapshot = Create-DiskSnapshot -DiskName $dataDisk.Disk.Name -TargetResourceGroupName $TargetResourceGroupName -Location $Location -DiskId $dataDisk.Disk.Id
+        
+        $dataSnapshots += @{
+            'Snapshot' = $snapshot
+            'Lun' = $dataDisk.Lun
+            'CachingMode' = $dataDisk.CachingMode
+            'Encrypted' = $dataDisk.Encrypted
+            'DiskSizeGB' = $dataDisk.DiskSizeGB
+            'StorageAccountType' = $dataDisk.Disk.Sku.Name
+        }
+    }
+
+    # Create new OS disk from snapshot with original specifications
+    Write-Host "Creating new OS disk in target subscription..."
+    $diskConfig = New-AzDiskConfig -Location $Location -CreateOption Copy -SourceResourceId $osSnapshot.Id -DiskSizeGB $osDisk.DiskSizeGB
+    $diskConfig = Set-AzDiskSkuName -DiskConfig $diskConfig -SkuName $osDisk.Sku.Name
+
+    if ($osDiskEncryption.OsDiskEncrypted) {
+        Write-Host "Applying platform-managed encryption to new OS disk..."
+        $encryptionSetName = "$VMName-EncryptionSet"
+        $encryptionSet = New-AzDiskEncryptionSet -Name $encryptionSetName -ResourceGroupName $TargetResourceGroupName -Location $Location -SourceVaultId $osDiskEncryption.OsDiskEncryptionSetId
+        $diskConfig = Set-AzDiskDiskEncryptionSet -DiskEncryptionSetId $encryptionSet.Id -DiskConfig $diskConfig
+    }
+    $newOSDiskName = "$VMName-OS-Disk"
+    $newOSDisk = New-AzDisk -ResourceGroupName $TargetResourceGroupName -DiskName $newOSDiskName -Disk $diskConfig
+
+    # Create new data disks from snapshots with original specifications
+    Write-Host "Creating new data disks in target subscription..."
+    $newDataDisks = @()
+    foreach ($dataSnapshot in $dataSnapshots) {
+        $diskConfig = New-AzDiskConfig -Location $Location -CreateOption Copy -SourceResourceId $dataSnapshot.Snapshot.Id -DiskSizeGB $dataSnapshot.DiskSizeGB
+        $diskConfig = Set-AzDiskSkuName -DiskConfig $diskConfig -SkuName $dataSnapshot.StorageAccountType
+
+        if ($dataSnapshot.Encrypted) {
+            Write-Host "Applying platform-managed encryption to new data disk..."
+            $encryptionSetName = "$($dataSnapshot.Snapshot.Name)-EncryptionSet"
+            $encryptionSet = New-AzDiskEncryptionSet -Name $encryptionSetName -ResourceGroupName $TargetResourceGroupName -Location $Location -SourceVaultId $osDiskEncryption.OsDiskEncryptionSetId
+            $diskConfig = Set-AzDiskDiskEncryptionSet -DiskEncryptionSetId $encryptionSet.Id -DiskConfig $diskConfig
+        }
+        $newDataDiskName = "$($dataSnapshot.Snapshot.Name)-Disk"
+        $newDisk = New-AzDisk -ResourceGroupName $TargetResourceGroupName -DiskName $newDataDiskName -Disk $diskConfig
+        $newDataDisks += @{
+            'Disk' = $newDisk
+            'Lun' = $dataSnapshot.Lun
+            'CachingMode' = $dataSnapshot.CachingMode
+            'Encrypted' = $dataSnapshot.Encrypted
+            'DiskSizeGB' = $dataSnapshot.DiskSizeGB
+        }
+    }
+
+    # Get target virtual network and subnet
+    Write-Host "Getting target network information..."
+    $targetVNet = Get-AzVirtualNetwork -Name $TargetVNetName -ResourceGroupName $TargetResourceGroupName
+    $targetSubnet = $targetVNet.Subnets | Where-Object { $_.Name -eq $TargetSubnetName }
+
+    # Create new NIC with static IP
+    Write-Host "Creating new network interface with static IP $TargetIPAddress..."
+    $nicName = "$VMName-nic"
+    $ipConfig = New-AzNetworkInterfaceIpConfig -Name "IPConfig1" `
+        -SubnetId $targetSubnet.Id `
+        -PrivateIpAddress $TargetIPAddress `
+        -Primary
+
+    $nic = New-AzNetworkInterface -Name $nicName `
+        -ResourceGroupName $TargetResourceGroupName `
+        -Location $Location `
+        -IpConfiguration $ipConfig
+
+    # Create new VM configuration with specified Availability Zone
+    Write-Host "Creating new VM configuration with Availability Zone $AvailabilityZone..."
+    $newVM = New-AzVMConfig -VMName $VMName -VMSize $sourceVM.HardwareProfile.VmSize -Zone $AvailabilityZone
+
+    # Set OS Disk with original OS type
+    $osType = $sourceVM.StorageProfile.OsDisk.OsType
+    $newVM = Set-AzVMOSDisk -VM $newVM -ManagedDiskId $newOSDisk.Id -CreateOption Attach -OsType $osType
+
+    # Attach data disks
+    Write-Host "Attaching data disks to new VM configuration..."
+    foreach ($newDataDisk in $newDataDisks) {
+        $newVM = Add-AzVMDataDisk -VM $newVM -ManagedDiskId $newDataDisk.Disk.Id -Lun $newDataDisk.Lun -CreateOption Attach -Caching $newDataDisk.CachingMode -DiskSizeInGB $newDataDisk.DiskSizeGB
+    }
+
+    # Add network interface
+    $newVM = Add-AzVMNetworkInterface -VM $newVM -Id $nic.Id
+
+    # Configure Boot Diagnostics with managed storage
+    Write-Host "Configuring Boot Diagnostics with Managed Storage..."
+    $newVM = Set-AzVMBootDiagnostic -VM $newVM -Enable -StorageAccountType "Managed"
+
+    # Create the new VM
+    Write-Host "Creating new VM in target subscription..."
+    New-AzVM -ResourceGroupName $TargetResourceGroupName -Location $Location -VM $newVM -Zone $AvailabilityZone
+
+    Write-Host "Migration completed successfully with IP address $TargetIPAddress in Availability Zone $AvailabilityZone!"
+}
+catch {
+    Handle-Error $_.Exception.Message
+}
+```
+
+```
+
+The script remains the same as in the previous version, with the key change being the Boot Diagnostics configuration:
+
+```powershell
+# Configure Boot Diagnostics with managed storage
+Write-Host "Configuring Boot Diagnostics with Managed Storage..."
+$newVM = Set-AzVMBootDiagnostic -VM $newVM -Enable -StorageAccountType "Managed"
+```
+
+This modification:
+- Enables boot diagnostics
+- Uses Azure's managed storage option
+- Removes the need to create a separate storage account
+- Simplifies the migration process
+
+To use the script, you'll need to provide all the mandatory parameters, including the Availability Zone:
+
+```powershell
+.\VMMigrationScript.ps1 -SourceSubscriptionId "source-sub-id" `
+                         -TargetSubscriptionId "target-sub-id" `
+                         -SourceResourceGroupName "source-rg" `
+                         -TargetResourceGroupName "target-rg" `
+                         -VMName "MyVM" `
+                         -TargetVNetName "target-vnet" `
+                         -TargetSubnetName "target-subnet" `
+                         -Location "eastus" `
+                         -TargetIPAddress "10.0.0.10" `
+                         -AvailabilityZone 1
+```
+
+Is there anything else you'd like me to modify or explain?
