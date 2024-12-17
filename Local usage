@@ -1,0 +1,121 @@
+Here's a comprehensive PowerShell script to accomplish this task using a jump server:
+
+```powershell
+# Jump Server Script for Remote System Report Collection
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$RemoteServer,
+    
+    [Parameter(Mandatory=$true)]
+    [System.Management.Automation.PSCredential]$Credential
+)
+
+# Paths
+$tempFolder = "C:\Temp"
+$remoteScriptPath = "C:\Temp\SystemReport.ps1"
+$remoteReportPath = "C:\Temp\SystemReport.json"
+$localReportPath = "C:\Reports\$RemoteServer-SystemReport.json"
+
+# Ensure local reports directory exists
+if (-not (Test-Path -Path (Split-Path $localReportPath -Parent))) {
+    New-Item -ItemType Directory -Path (Split-Path $localReportPath -Parent) | Out-Null
+}
+
+try {
+    # Copy the script to the remote server
+    $scriptContent = @"
+# Function definitions and full script from previous response goes here
+# (Use the local execution version of the script)
+"@
+
+    # Establish remote session
+    $session = New-PSSession -ComputerName $RemoteServer -Credential $Credential
+
+    # Create temp directory on remote server if it doesn't exist
+    Invoke-Command -Session $session -ScriptBlock {
+        if (-not (Test-Path -Path "C:\Temp")) {
+            New-Item -ItemType Directory -Path "C:\Temp" | Out-Null
+        }
+    }
+
+    # Write the script to the remote server
+    Set-Content -Path "C:\Temp\SystemReport.ps1" -Value $scriptContent -Encoding UTF8
+
+    # Copy the script to the remote server
+    Copy-Item -Path "C:\Temp\SystemReport.ps1" -Destination $remoteScriptPath -ToSession $session
+
+    # Execute the script on the remote server
+    $result = Invoke-Command -Session $session -ScriptBlock {
+        # Execute the script
+        & $using:remoteScriptPath
+        
+        # Read the generated report
+        $reportContent = Get-Content -Path $using:remoteReportPath -Raw
+        
+        # Remove the temporary report file
+        Remove-Item -Path $using:remoteReportPath -Force
+        
+        return $reportContent
+    }
+
+    # Save the report locally
+    $result | Out-File -FilePath $localReportPath -Encoding UTF8
+
+    # Optional: Remove temporary script from remote server
+    Invoke-Command -Session $session -ScriptBlock {
+        Remove-Item -Path $using:remoteScriptPath -Force
+    }
+
+    Write-Host "Report successfully collected from $RemoteServer" -ForegroundColor Green
+    Write-Host "Report saved to: $localReportPath" -ForegroundColor Cyan
+
+    # Optionally, display report contents
+    $reportObject = $result | ConvertFrom-Json
+    $reportObject.PSObject.Properties | ForEach-Object {
+        Write-Host ("{0}: {1}" -f $_.Name, $_.Value)
+    }
+}
+catch {
+    Write-Host "Error occurred: $_" -ForegroundColor Red
+}
+finally {
+    # Close the remote session
+    if ($session) {
+        Remove-PSSession $session
+    }
+}
+```
+
+Usage Example:
+```powershell
+# Create credential object
+$username = "domain\adminuser"
+$password = ConvertTo-SecureString "YourPassword" -AsPlainText -Force
+$credential = New-Object System.Management.Automation.PSCredential($username, $password)
+
+# Execute the script
+.\CollectRemoteSystemReport.ps1 -RemoteServer "ServerName" -Credential $credential
+```
+
+Key Features:
+1. Copies script to remote server's temp folder
+2. Executes script remotely
+3. Collects and saves report locally
+4. Cleans up temporary files
+5. Handles credentials securely
+6. Provides error handling
+7. Optional report display
+
+Prerequisites:
+- PowerShell Remoting enabled
+- Administrative credentials
+- Network connectivity
+- WinRM configured
+
+Recommendations:
+- Use least-privilege credentials
+- Ensure secure network path
+- Implement additional logging if needed
+
+Would you like me to elaborate on any aspect of the script?
