@@ -1,0 +1,157 @@
+I'll modify the report generation to output a CSV format. Here's how to adjust the script:
+
+```powershell
+# Function to format data for CSV
+function Format-DataForCSV {
+    param (
+        [Parameter(Mandatory=$true)]
+        [PSCustomObject]$Data
+    )
+    
+    $csvData = @()
+    
+    # Drive Information
+    foreach ($drive in $Data."Drive Information") {
+        $csvData += [PSCustomObject]@{
+            Category = "Drive Information"
+            Item = "Drive $($drive.DriveLetter)"
+            Value = "Label: $($drive.Label), Free Space: $($drive.FreeSpaceGB)GB, Total: $($drive.TotalSizeGB)GB, Free: $($drive.PercentFree)%"
+        }
+    }
+    
+    # Host Specifications
+    $specs = $Data."Host Specifications"
+    $csvData += [PSCustomObject]@{
+        Category = "Host Specifications"
+        Item = "Processor"
+        Value = $specs.Processor
+    }
+    $csvData += [PSCustomObject]@{
+        Category = "Host Specifications"
+        Item = "Memory"
+        Value = "$($specs.MemoryGB) GB"
+    }
+    $csvData += [PSCustomObject]@{
+        Category = "Host Specifications"
+        Item = "OS"
+        Value = $specs.OSName
+    }
+    
+    # Network Connectivity
+    $network = $Data."Remote Connectivity"
+    foreach ($conn in $network.ConnectivityResults) {
+        $csvData += [PSCustomObject]@{
+            Category = "Network Connectivity"
+            Item = $conn.DestinationIP
+            Value = "Port: $($conn.Port), Reachable: $($conn.PortReachable), Time: $($conn.TestTimestamp)"
+        }
+    }
+    
+    # Network Info
+    $netInfo = $network.NetworkInfo
+    $csvData += [PSCustomObject]@{
+        Category = "Network Info"
+        Item = "IP Address"
+        Value = $netInfo.IPAddress
+    }
+    $csvData += [PSCustomObject]@{
+        Category = "Network Info"
+        Item = "Default Gateway"
+        Value = $netInfo.DefaultGateway
+    }
+    $csvData += [PSCustomObject]@{
+        Category = "Network Info"
+        Item = "DNS Servers"
+        Value = ($netInfo.DNSServers -join ", ")
+    }
+    
+    # Add other basic information
+    $csvData += [PSCustomObject]@{
+        Category = "Domain Status"
+        Item = "Domain Membership"
+        Value = $Data."Domain Membership"
+    }
+    $csvData += [PSCustomObject]@{
+        Category = "Agents"
+        Item = "SCCM Status"
+        Value = $Data."SCCM Agent"
+    }
+    $csvData += [PSCustomObject]@{
+        Category = "Agents"
+        Item = "CarbonBlack Status"
+        Value = $Data."CarbonBlack Agent"
+    }
+    $csvData += [PSCustomObject]@{
+        Category = "Agents"
+        Item = "Splunk Status"
+        Value = $Data."Splunk Forwarder"
+    }
+    
+    return $csvData
+}
+
+# Add this to the end of your main script
+$csvPath = "C:\Temp\SystemReport.csv"
+$csvData = Format-DataForCSV -Data $report
+$csvData | Export-Csv -Path $csvPath -NoTypeInformation
+
+```
+
+Then modify the collection script to handle CSV:
+
+```powershell
+# In your collection script, modify the report collection part:
+
+# Execute the script on the remote server
+$result = Invoke-Command -Session $session -ScriptBlock {
+    # Execute the script
+    & $using:remoteScriptPath
+    
+    # Read the generated CSV
+    $csvContent = Import-Csv -Path "C:\Temp\SystemReport.csv"
+    
+    # Remove the temporary report file
+    Remove-Item -Path "C:\Temp\SystemReport.csv" -Force
+    
+    return $csvContent
+}
+
+# Save the report locally
+$localCsvPath = "C:\Reports\$RemoteServer-SystemReport.csv"
+$result | Export-Csv -Path $localCsvPath -NoTypeInformation
+
+Write-Host "Report successfully collected from $RemoteServer" -ForegroundColor Green
+Write-Host "Report saved to: $localCsvPath" -ForegroundColor Cyan
+
+# Display report summary
+$result | Group-Object Category | ForEach-Object {
+    Write-Host "`n$($_.Name):" -ForegroundColor Yellow
+    $_.Group | ForEach-Object {
+        Write-Host "  $($_.Item): $($_.Value)"
+    }
+}
+```
+
+The CSV output will have three columns:
+1. Category (grouping of information)
+2. Item (specific metric or check)
+3. Value (result or status)
+
+Sample CSV output:
+```csv
+Category,Item,Value
+"Drive Information","Drive C","Label: System, Free Space: 50GB, Total: 100GB, Free: 50%"
+"Host Specifications","Processor","Intel(R) Xeon(R) CPU E5-2680 v3 @ 2.50GHz"
+"Network Connectivity","8.8.8.8","Port: 53, Reachable: True, Time: 12/27/2024 10:30:45 AM"
+"Network Info","IP Address","192.168.1.100"
+"Agents","SCCM Status","SCCM agent installed and running"
+```
+
+Benefits of CSV format:
+1. Easy to import into Excel
+2. Simple to parse programmatically
+3. Standardized format
+4. Better for data analysis
+5. Compatible with reporting tools
+
+Would you like me to add any specific categories or modify the CSV structure?
