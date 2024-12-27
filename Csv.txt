@@ -1,157 +1,127 @@
-I'll modify the report generation to output a CSV format. Here's how to adjust the script:
+I'll help you create a PowerShell script that generates CSV output from the existing system information script. I'll create a modified version that exports to CSV format.
+
+
 
 ```powershell
-# Function to format data for CSV
-function Format-DataForCSV {
+# Function to format object for CSV
+function Format-ForCSV {
     param (
         [Parameter(Mandatory=$true)]
-        [PSCustomObject]$Data
+        [object]$InputObject,
+        [string]$Prefix = ""
     )
     
-    $csvData = @()
+    $properties = @()
     
-    # Drive Information
-    foreach ($drive in $Data."Drive Information") {
-        $csvData += [PSCustomObject]@{
-            Category = "Drive Information"
-            Item = "Drive $($drive.DriveLetter)"
-            Value = "Label: $($drive.Label), Free Space: $($drive.FreeSpaceGB)GB, Total: $($drive.TotalSizeGB)GB, Free: $($drive.PercentFree)%"
+    foreach ($property in $InputObject.PSObject.Properties) {
+        $value = $property.Value
+        
+        # Handle nested objects and arrays
+        if ($value -is [System.Collections.IDictionary] -or $value.PSObject.Properties) {
+            $nestedProperties = Format-ForCSV -InputObject $value -Prefix "${Prefix}${property.Name}_"
+            $properties += $nestedProperties
+        }
+        elseif ($value -is [System.Collections.IList] -and $value.Count -gt 0) {
+            $value = $value -join "; "
+            $properties += [PSCustomObject]@{
+                Name = "${Prefix}${property.Name}"
+                Value = $value
+            }
+        }
+        else {
+            $properties += [PSCustomObject]@{
+                Name = "${Prefix}${property.Name}"
+                Value = $value
+            }
         }
     }
     
-    # Host Specifications
-    $specs = $Data."Host Specifications"
-    $csvData += [PSCustomObject]@{
-        Category = "Host Specifications"
-        Item = "Processor"
-        Value = $specs.Processor
-    }
-    $csvData += [PSCustomObject]@{
-        Category = "Host Specifications"
-        Item = "Memory"
-        Value = "$($specs.MemoryGB) GB"
-    }
-    $csvData += [PSCustomObject]@{
-        Category = "Host Specifications"
-        Item = "OS"
-        Value = $specs.OSName
+    return $properties
+}
+
+# Function to get all system information and format for CSV
+function Get-SystemInfoForCSV {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$HostName
+    )
+    
+    # Collect all information using existing functions
+    $systemInfo = [ordered]@{
+        "DomainMembership" = Check-DomainMembership -ComputerName $HostName
+        "SCCMAgent" = Check-SCCMAgent -ComputerName $HostName
+        "ComputerOU" = Get-ComputerOU -ComputerName $HostName
+        "DriveInfo" = Get-DriveInfo -ComputerName $HostName
+        "HostSpecs" = Get-HostSpecs -ComputerName $HostName
+        "LocalGroups" = Get-LocalGroupMembers -ComputerName $HostName
+        "DateTime" = Get-DateTimeInfo -ComputerName $HostName
+        "WindowsDefender" = Check-WindowsDefenderTraffic -ComputerName $HostName
+        "CarbonBlack" = Check-CarbonBlackAgent -ComputerName $HostName
+        "SplunkForwarder" = Check-SplunkForwarder -ComputerName $HostName
+        "JEADiscovery" = Check-JEADiscovery -ComputerName $HostName
+        "RemoteConnectivity" = Test-RemoteConnectivity -ComputerName $HostName
     }
     
-    # Network Connectivity
-    $network = $Data."Remote Connectivity"
-    foreach ($conn in $network.ConnectivityResults) {
-        $csvData += [PSCustomObject]@{
-            Category = "Network Connectivity"
-            Item = $conn.DestinationIP
-            Value = "Port: $($conn.Port), Reachable: $($conn.PortReachable), Time: $($conn.TestTimestamp)"
-        }
+    # Create CSV record
+    $csvData = [PSCustomObject]@{
+        Hostname = $HostName
+        Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     }
     
-    # Network Info
-    $netInfo = $network.NetworkInfo
-    $csvData += [PSCustomObject]@{
-        Category = "Network Info"
-        Item = "IP Address"
-        Value = $netInfo.IPAddress
-    }
-    $csvData += [PSCustomObject]@{
-        Category = "Network Info"
-        Item = "Default Gateway"
-        Value = $netInfo.DefaultGateway
-    }
-    $csvData += [PSCustomObject]@{
-        Category = "Network Info"
-        Item = "DNS Servers"
-        Value = ($netInfo.DNSServers -join ", ")
-    }
+    # Format all collected data for CSV
+    $flatProperties = Format-ForCSV -InputObject $systemInfo
     
-    # Add other basic information
-    $csvData += [PSCustomObject]@{
-        Category = "Domain Status"
-        Item = "Domain Membership"
-        Value = $Data."Domain Membership"
-    }
-    $csvData += [PSCustomObject]@{
-        Category = "Agents"
-        Item = "SCCM Status"
-        Value = $Data."SCCM Agent"
-    }
-    $csvData += [PSCustomObject]@{
-        Category = "Agents"
-        Item = "CarbonBlack Status"
-        Value = $Data."CarbonBlack Agent"
-    }
-    $csvData += [PSCustomObject]@{
-        Category = "Agents"
-        Item = "Splunk Status"
-        Value = $Data."Splunk Forwarder"
+    # Add all properties to the CSV record
+    foreach ($prop in $flatProperties) {
+        $csvData | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
     }
     
     return $csvData
 }
 
-# Add this to the end of your main script
-$csvPath = "C:\Temp\SystemReport.csv"
-$csvData = Format-DataForCSV -Data $report
-$csvData | Export-Csv -Path $csvPath -NoTypeInformation
+# Set the hostname and export paths
+$HostName = "RemoteServerName"  # Replace with actual remote server name
+$csvPath = "C:\Reports\SystemReport.csv"
+
+# Generate and export the CSV report
+$csvReport = Get-SystemInfoForCSV -HostName $HostName
+$csvReport | Export-Csv -Path $csvPath -NoTypeInformation
+Write-Host "CSV report generated at: $csvPath"
 
 ```
 
-Then modify the collection script to handle CSV:
+This script modifies the original code to generate CSV output. Here are the key changes and features:
 
-```powershell
-# In your collection script, modify the report collection part:
+1. Added a `Format-ForCSV` function that:
+   - Flattens nested objects and arrays into CSV-compatible format
+   - Handles complex data structures by creating properly formatted column names
+   - Joins array values with semicolons for CSV compatibility
 
-# Execute the script on the remote server
-$result = Invoke-Command -Session $session -ScriptBlock {
-    # Execute the script
-    & $using:remoteScriptPath
-    
-    # Read the generated CSV
-    $csvContent = Import-Csv -Path "C:\Temp\SystemReport.csv"
-    
-    # Remove the temporary report file
-    Remove-Item -Path "C:\Temp\SystemReport.csv" -Force
-    
-    return $csvContent
-}
+2. Created a `Get-SystemInfoForCSV` function that:
+   - Collects all system information using the original functions
+   - Formats the data for CSV output
+   - Includes hostname and timestamp in each record
 
-# Save the report locally
-$localCsvPath = "C:\Reports\$RemoteServer-SystemReport.csv"
-$result | Export-Csv -Path $localCsvPath -NoTypeInformation
+3. The output CSV will include columns for:
+   - Basic system information
+   - Drive information with separate columns for each drive
+   - Host specifications
+   - Security agent status
+   - Network connectivity results
+   - Local group memberships
+   - And more
 
-Write-Host "Report successfully collected from $RemoteServer" -ForegroundColor Green
-Write-Host "Report saved to: $localCsvPath" -ForegroundColor Cyan
+To use this script:
 
-# Display report summary
-$result | Group-Object Category | ForEach-Object {
-    Write-Host "`n$($_.Name):" -ForegroundColor Yellow
-    $_.Group | ForEach-Object {
-        Write-Host "  $($_.Item): $($_.Value)"
-    }
-}
-```
+1. Keep all the original functions from your provided script
+2. Add this new code at the end
+3. Replace "RemoteServerName" with your actual target hostname
+4. Run the script to generate a CSV file
 
-The CSV output will have three columns:
-1. Category (grouping of information)
-2. Item (specific metric or check)
-3. Value (result or status)
+The CSV format makes it easy to:
+- Import the data into Excel or other analysis tools
+- Compare system information across multiple machines
+- Create reports and dashboards
+- Perform data analysis on the collected information
 
-Sample CSV output:
-```csv
-Category,Item,Value
-"Drive Information","Drive C","Label: System, Free Space: 50GB, Total: 100GB, Free: 50%"
-"Host Specifications","Processor","Intel(R) Xeon(R) CPU E5-2680 v3 @ 2.50GHz"
-"Network Connectivity","8.8.8.8","Port: 53, Reachable: True, Time: 12/27/2024 10:30:45 AM"
-"Network Info","IP Address","192.168.1.100"
-"Agents","SCCM Status","SCCM agent installed and running"
-```
-
-Benefits of CSV format:
-1. Easy to import into Excel
-2. Simple to parse programmatically
-3. Standardized format
-4. Better for data analysis
-5. Compatible with reporting tools
-
-Would you like me to add any specific categories or modify the CSV structure?
+Would you like me to modify any part of the CSV export functionality or add additional fields to the output?
