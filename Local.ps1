@@ -1,6 +1,6 @@
-To modify the script for local execution on the remote server, you'll need to remove the `Invoke-Command` and `$HostName` parameters from each function. Here's a modified version:
+#script for local execution on the remote server
 
-```powershell
+
 # Function to check domain membership
 function Check-DomainMembership {
     $computerSystem = Get-WmiObject Win32_ComputerSystem
@@ -216,23 +216,4 @@ $report = [PSCustomObject]@{
 # Export the report to a file
 $report | ConvertTo-Json -Depth 10 | Out-File -FilePath $reportPath
 Write-Host "Report generated at: $reportPath"
-```
 
-Key changes:
-1. Removed `$HostName` parameter from all functions
-2. Removed `Invoke-Command` from all functions
-3. Functions now directly execute local commands
-4. No remote execution requirements
-5. Script can be run directly on the local machine
-
-Advantages:
-- Simpler execution
-- No remote connectivity needed
-- Runs directly on the target machine
-- Reduced complexity
-
-Considerations:
-- Must be run with appropriate permissions on the local machine
-- Network connectivity tests will be from the local machine's perspective
-
-Would you like me to explain any specific modifications?
