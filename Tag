@@ -1,0 +1,282 @@
+
+Azure Landing Zone Standards and Default Resources
+
+1. Introduction
+
+This document outlines the standards for setting up an Azure landing zone subscription, including naming conventions, resource deployment practices, monitoring standards, and access control policies.
+
+2. Subscription Setup and Management
+
+The cloud foundation team is responsible for provisioning the Azure subscription upon request.
+
+The subscription must be assigned to the appropriate Management Group for ABC Landing Zone, categorized by environment:
+
+DEV (Development)
+
+PREPROD (Pre-Production)
+
+PROD (Production)
+
+
+
+3. Core Networking & IP Addressing
+
+Apply to the core services team for IP range allocation.
+
+Ensure that VNet subnets align with approved CIDR ranges.
+
+Restrict public access to sensitive resources like Key Vault.
+
+
+4. Deployment Methodology
+
+All resources must be deployed using Terraform configurations stored in a GitHub repository.
+
+Deployment to Azure will be managed via GitHub Actions, ensuring best practices such as:
+
+Code Reviews & Pull Requests
+
+State Management using Azure Storage
+
+Role-Based Access Control (RBAC) for Automation
+
+
+
+5. Default Resources and Naming Standards
+
+Each resource follows a consistent naming convention:
+
+6. Default Tagging Standards
+
+Subscription-Level Tags:
+
+Application
+
+CostCenter
+
+Criticality
+
+
+Resource-Level Tags (Applied as needed):
+
+Owner
+
+Environment
+
+Department
+
+BusinessUnit
+
+
+
+7. Monitoring & Alerting Standards
+
+The following default alerts must be configured for all landing zone subscriptions:
+
+Subscription-Level Alerts
+
+Log Analytics & DCR Association
+
+All logs should be collected through DCR and stored in Log Analytics Workspace (LAW) under the commonservices resource group, unless a specific request is made.
+
+
+8. Access Control (RBAC) Standards
+
+The Subscription-Level RBAC must include:
+
+Azure Administrators → Owner role
+
+GitHub Actions Service Principal → Contributor role
+
+
+Access should be provided following the principle of least privilege.
+
+
+9. Key Vault Security Standards
+
+Public access must be disabled.
+
+Access must be restricted to specific Jump Host subnets.
+
+Role assignments should be managed via Azure RBAC.
+
+
+10. Common Services Resource Group
+
+A default Resource Group named rg-commonservices-<env>-<region> must be created and must house the following resources:
+
+Action Groups
+
+Resource Alerts
+
+DCR (Data Collection Rule)
+
+Log Analytics Workspace (LAW)
+
+Recovery Vault
+
+
+11. Special Requests & Exceptions
+
+If an application requires a separate DCR, LAW, or Backup Vault, approval must be obtained from the cloud foundation team.
+
+Security exceptions must be documented and reviewed periodically.
+
+
+
+---
+
+This document provides a baseline for structuring an Azure landing zone and ensures consistency, security, and best practices across all deployments.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Azure Landing Zone Standards and Default Resources Document
+
+## **1. Introduction**
+This document outlines the standards and guidelines for setting up an Azure Landing Zone subscription, including naming conventions, resource deployment, monitoring, and access control. The goal is to ensure consistency, security, and operational efficiency across all environments (Dev, PreProd, Prod).
+
+---
+
+## **2. Subscription Request Process**
+1. **Subscription Request**: 
+   - Submit a request to the Cloud Foundation Team for a new subscription.
+   - Specify the environment (Dev, PreProd, Prod) and the intended use case.
+   - The subscription will be placed under the appropriate **ABC Landing Zone Management Group**.
+
+2. **IP Range Allocation**:
+   - Request IP ranges for VNet creation from the Core Services Team.
+
+---
+
+## **3. Deployment Process**
+- **Deployment Tool**: Terraform configuration files stored in a GitHub repository.
+- **CI/CD Pipeline**: GitHub Actions will be used to deploy resources to Azure.
+- **Best Practices**:
+  - Use modular Terraform code for reusability.
+  - Implement state file management using Azure Storage Account for Terraform backend.
+  - Use GitHub Secrets for sensitive information.
+
+---
+
+## **4. Naming Standards**
+All resources must adhere to the following naming conventions:
+
+| **Resource Type**         | **Naming Standard**                                                                 | **Example**                          |
+|---------------------------|-------------------------------------------------------------------------------------|--------------------------------------|
+| **Subscription**          | `sub-<env>-<application>-<region>`                                                 | `sub-dev-app1-eastus`                |
+| **Resource Group**        | `rg-<env>-<application>-<purpose>-<region>`                                        | `rg-dev-app1-network-eastus`         |
+| **Virtual Network (VNet)**| `vnet-<env>-<application>-<region>`                                                | `vnet-dev-app1-eastus`               |
+| **Data Collection Rule (DCR)** | `dcr-<env>-<application>-<purpose>`                                           | `dcr-dev-app1-monitoring`            |
+| **Log Analytics Workspace (LAW)** | `law-<env>-<application>-<region>`                                        | `law-dev-app1-eastus`                |
+| **Recovery Service Vault**| `rsv-<env>-<application>-<region>`                                                 | `rsv-dev-app1-eastus`                |
+| **Backup Policy**         | `bp-<env>-<application>-<frequency>`                                               | `bp-dev-app1-daily`                  |
+| **Key Vault**             | `kv-<env>-<application>-<region>`                                                  | `kv-dev-app1-eastus`                 |
+
+---
+
+## **5. Tagging Standards**
+- **Default Subscription Tags**:
+  - `Application`: Name of the application.
+  - `CostCenter`: Cost center code.
+  - `Criticality`: High/Medium/Low.
+  - `Environment`: Dev/PreProd/Prod.
+  - `Owner`: Email of the owner.
+
+- **Resource-Specific Tags**:
+  - Resources within the subscription may have additional tags as needed (e.g., `Component`, `Version`).
+
+---
+
+## **6. Monitoring Standards**
+### **Alerts**
+1. **High CPU Usage**:
+   - Metric: Percentage CPU > 80% for 5 minutes.
+   - Action: Notify the Operations Team via email and SMS.
+
+2. **Storage Account Threshold**:
+   - Metric: Storage account capacity > 90%.
+   - Action: Notify the Storage Team.
+
+3. **Key Vault Access Denials**:
+   - Metric: Key Vault access denials > 5 in 1 minute.
+   - Action: Notify the Security Team.
+
+4. **Backup Failures**:
+   - Metric: Backup job failures.
+   - Action: Notify the Backup Team.
+
+5. **Network Security Group (NSG) Rule Hits**:
+   - Metric: NSG rule hits > 100 in 1 minute.
+   - Action: Notify the Network Team.
+
+---
+
+## **7. Access Control**
+- **Default RBAC Roles**:
+  - **Admins**: Owner role for the subscription.
+  - **Service Principal (SPA)**: Contributor role for GitHub Actions to deploy resources.
+
+- **Key Vault Access**:
+  - Disable public access.
+  - Restrict access to specific jump host subnets.
+
+---
+
+## **8. Default Resources**
+### **Resource Group: `rg-<env>-commonservices-<region>`**
+This resource group will house the following shared resources:
+1. **Action Groups**: For alert notifications.
+2. **Data Collection Rule (DCR)**: Centralized logging for all resources.
+3. **Log Analytics Workspace (LAW)**: Centralized monitoring.
+4. **Recovery Service Vault**: Centralized backup and recovery.
+5. **Resource Alerts**: Default alerts for the subscription.
+
+---
+
+## **9. Key Vault Configuration**
+- **Access Policies**:
+  - Grant access only to specific jump host subnets.
+  - Use Azure Private Link for secure access.
+- **Secret Rotation**: Enable automatic secret rotation for critical secrets.
+
+---
+
+## **10. Backup and Recovery**
+- **Backup Policy**:
+  - Daily backups with a retention period of 30 days.
+  - Weekly backups with a retention period of 12 weeks.
+- **Recovery Service Vault**:
+  - Ensure all critical resources are associated with the vault.
+
+---
+
+## **11. Compliance and Security**
+- **Audit Logging**: Enable Azure Activity Logs and send them to the central LAW.
+- **Network Security**:
+  - Use NSGs to restrict traffic.
+  - Implement Azure Firewall for outbound traffic control.
+- **Encryption**: Enable encryption at rest and in transit for all resources.
+
+---
+
+## **12. Appendix**
+- **Terraform Modules**: Links to reusable Terraform modules for resource deployment.
+- **GitHub Actions Workflow**: Sample workflow for deploying resources.
+- **Contact Information**: Cloud Foundation Team, Core Services Team, and Operations Team.
+
+---
+
+This document serves as the foundation for setting up and managing Azure Landing Zones. Adherence to these standards ensures a secure, scalable, and well-managed cloud environment.
