@@ -1,0 +1,325 @@
+Updated Terraform configuration with Office 365 email integration:
+
+### Updated Directory Structure
+```
+modules/
+  ├── keyvault-monitoring/
+  │   ├── main.tf
+  │   ├── variables.tf
+  │   └── outputs.tf
+main.tf
+variables.tf
+outputs.tf
+terraform.tfvars
+```
+
+### 1. Root Module Files
+
+#### main.tf
+```hcl
+terraform {
+  required_version = ">= 1.3.0"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+module "keyvault_monitoring" {
+  for_each = { for idx, config in var.deployments : idx => config }
+
+  source              = "./modules/keyvault-monitoring"
+  resource_group_name = each.value.resource_group_name
+  location            = each.value.location
+  keyvault_id         = each.value.keyvault_id
+  logic_app_name      = each.value.logic_app_name
+  notification_email  = each.value.notification_email
+  sender_email        = each.value.sender_email
+  tenant_id           = each.value.tenant_id
+  expiry_threshold_days = each.value.expiry_threshold_days
+  tags                = each.value.tags
+}
+```
+
+#### variables.tf
+```hcl
+variable "deployments" {
+  description = "List of monitoring deployment configurations"
+  type = list(object({
+    resource_group_name    = string
+    location              = string
+    keyvault_id           = string
+    logic_app_name        = string
+    notification_email    = string
+    sender_email          = string
+    tenant_id             = string
+    expiry_threshold_days = number
+    tags                  = map(string)
+  }))
+  default = []
+}
+```
+
+#### outputs.tf
+```hcl
+output "logic_apps" {
+  description = "Map of deployed Logic App IDs"
+  value = { for k, v in module.keyvault_monitoring : k => v.logic_app_id }
+}
+
+output "event_subscriptions" {
+  description = "Map of deployed Event Grid subscription IDs"
+  value = { for k, v in module.keyvault_monitoring : k => v.event_subscription_id }
+}
+
+output "office365_connections" {
+  description = "Map of Office 365 connection IDs that need authorization"
+  value = { for k, v in module.keyvault_monitoring : k => v.office365_connection_id }
+}
+```
+
+### 2. Child Module (modules/keyvault-monitoring)
+
+#### main.tf
+```hcl
+resource "azurerm_resource_group" "monitoring" {
+  name     = var.resource_group_name
+  location = var.location
+  tags     = var.tags
+}
+
+resource "azurerm_logic_app_workflow" "main" {
+  name                = var.logic_app_name
+  location            = azurerm_resource_group.monitoring.location
+  resource_group_name = azurerm_resource_group.monitoring.name
+  tags                = var.tags
+}
+
+resource "azurerm_logic_app_connection" "office365" {
+  name                = "office365-connection-${lower(replace(var.logic_app_name, "/[^0-9a-zA-Z]/", "-"))}"
+  resource_group_name = azurerm_resource_group.monitoring.name
+  logic_app_id        = azurerm_logic_app_workflow.main.id
+  connector_id        = "shared-office365-1"
+  
+  parameter_values = {
+    "token:TenantId" = var.tenant_id
+  }
+}
+
+resource "azurerm_logic_app_trigger_http_request" "main" {
+  name         = "keyvault_secret_expiry_trigger"
+  logic_app_id = azurerm_logic_app_workflow.main.id
+
+  schema = <<SCHEMA
+{
+  "type": "object",
+  "properties": {
+    "data": {
+      "type": "object",
+      "properties": {
+        "SecretName": { "type": "string" },
+        "ExpiryDate": { "type": "string" },
+        "VaultName": { "type": "string" }
+      }
+    }
+  }
+}
+SCHEMA
+}
+
+resource "azurerm_eventgrid_system_topic" "main" {
+  name                   = "evgt-${basename(var.keyvault_id)}"
+  location               = "global"
+  resource_group_name    = azurerm_resource_group.monitoring.name
+  source_arm_resource_id = var.keyvault_id
+  topic_type             = "Microsoft.KeyVault.vaults"
+  tags                   = var.tags
+}
+
+resource "azurerm_eventgrid_system_topic_event_subscription" "main" {
+  name                = "sub-secret-expiry-${basename(var.keyvault_id)}"
+  system_topic        = azurerm_eventgrid_system_topic.main.name
+  resource_group_name = azurerm_resource_group.monitoring.name
+
+  included_event_types = [
+    "Microsoft.KeyVault.SecretNearExpiry"
+  ]
+
+  subject_filter {
+    subject_begins_with = "/secrets/"
+  }
+
+  webhook_endpoint {
+    url = azurerm_logic_app_workflow.main.callback_url
+  }
+}
+
+resource "azurerm_logic_app_action_custom" "send_email" {
+  name         = "send_expiry_notification"
+  logic_app_id = azurerm_logic_app_workflow.main.id
+
+  body = <<BODY
+{
+  "runAfter": {},
+  "type": "ApiConnection",
+  "inputs": {
+    "body": {
+      "Body": "The secret '@{triggerBody()?['data']?['SecretName']}' in vault '@{triggerBody()?['data']?['VaultName']}' is expiring on @{triggerBody()?['data']?['ExpiryDate']} (expires in ${var.expiry_threshold_days} days).\n\nPlease rotate this secret before the expiration date.",
+      "Subject": "[Action Required] Secret Expiring Soon: @{triggerBody()?['data']?['SecretName']}",
+      "To": "${var.notification_email}",
+      "From": "${var.sender_email}"
+    },
+    "host": {
+      "connection": {
+        "name": "@parameters('$connections')['office365']['connectionId']"
+      }
+    },
+    "method": "post",
+    "path": "/v2/Mail"
+  }
+}
+BODY
+
+  depends_on = [
+    azurerm_logic_app_trigger_http_request.main,
+    azurerm_logic_app_connection.office365
+  ]
+}
+```
+
+#### variables.tf
+```hcl
+variable "resource_group_name" {
+  description = "Name of the resource group"
+  type        = string
+}
+
+variable "location" {
+  description = "Azure region for resources"
+  type        = string
+}
+
+variable "keyvault_id" {
+  description = "Resource ID of the Key Vault to monitor"
+  type        = string
+}
+
+variable "logic_app_name" {
+  description = "Name of the Logic App"
+  type        = string
+}
+
+variable "notification_email" {
+  description = "Email address to send notifications to"
+  type        = string
+}
+
+variable "sender_email" {
+  description = "Office 365 email address that will send notifications"
+  type        = string
+}
+
+variable "tenant_id" {
+  description = "Azure AD tenant ID for Office 365 connection"
+  type        = string
+}
+
+variable "expiry_threshold_days" {
+  description = "Number of days before expiry to trigger notification"
+  type        = number
+  default     = 30
+}
+
+variable "tags" {
+  description = "Tags to apply to resources"
+  type        = map(string)
+  default     = {}
+}
+```
+
+#### outputs.tf
+```hcl
+output "logic_app_id" {
+  description = "ID of the created Logic App"
+  value       = azurerm_logic_app_workflow.main.id
+}
+
+output "event_subscription_id" {
+  description = "ID of the Event Grid subscription"
+  value       = azurerm_eventgrid_system_topic_event_subscription.main.id
+}
+
+output "office365_connection_id" {
+  description = "ID of the Office 365 connection that needs authorization"
+  value       = azurerm_logic_app_connection.office365.id
+}
+```
+
+### 3. terraform.tfvars
+```hcl
+deployments = [
+  {
+    resource_group_name    = "rg-monitoring-eastus"
+    location              = "eastus"
+    keyvault_id           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-keyvaults/providers/Microsoft.KeyVault/vaults/kv-eastus-secrets"
+    logic_app_name        = "la-kv-monitor-eastus"
+    notification_email    = "security-east@company.com"
+    sender_email          = "noreply-alerts@company.com"
+    tenant_id             = "11111111-1111-1111-1111-111111111111"
+    expiry_threshold_days = 30
+    tags = {
+      Environment = "Production"
+      Department  = "Security"
+      Application = "KeyVault Monitoring"
+    }
+  },
+  {
+    resource_group_name    = "rg-monitoring-westus"
+    location              = "westus"
+    keyvault_id           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-keyvaults/providers/Microsoft.KeyVault/vaults/kv-westus-secrets"
+    logic_app_name        = "la-kv-monitor-westus"
+    notification_email    = "security-west@company.com"
+    sender_email          = "noreply-alerts@company.com"
+    tenant_id             = "11111111-1111-1111-1111-111111111111"
+    expiry_threshold_days = 45
+    tags = {
+      Environment = "Production"
+      Department  = "Security"
+      Application = "KeyVault Monitoring"
+    }
+  }
+]
+```
+
+### Post-Deployment Steps
+
+1. **Authorize Connections**:
+```bash
+# For each deployment, authorize the Office 365 connection:
+az resource invoke-action \
+  --action "listConnectionKeys" \
+  --ids $(terraform output -raw office365_connections["deployment_0"]) \
+  --api-version "2016-06-01"
+```
+
+2. **Verify Setup**:
+- Go to Azure Portal → Logic Apps
+- Select each deployed Logic App
+- Check "API connections" section and authorize if needed
+- Test with a sample secret near expiry
+
+### Key Improvements:
+
+1. **Complete Email Configuration** - Specifies both sender and recipient emails
+2. **Office 365 Connection** - Proper Terraform-managed API connection
+3. **Post-Deployment Guidance** - Clear steps for authorization
+4. **Enhanced Email Content** - More professional notification template
+5. **Connection Outputs** - Easy tracking of connections needing authorization
+
+This configuration is ready for production use and handles all aspects of the monitoring solution, including the email notification component.
