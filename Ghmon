@@ -319,3 +319,12 @@ terraform apply
    - Click "Authorize" and authenticate
 
 This configuration will successfully deploy all components with proper integration between Key Vault, Event Grid, and Logic Apps.
+
+
+Your Version (Problematic):
+"${azurerm_logic_app_workflow:this.access_endpoint}$
+${azurerm_logic_app_trigger_http_request:this.relative_path != null?  
+azurerm_logic_app_trigger_http_request:this.relative_path : "/default-path"?"
+
+My Fixed Version (Working):
+url = "${azurerm_logic_app_workflow.this.access_endpoint}${coalesce(azurerm_logic_app_trigger_http_request.this.relative_path, "/trigger")}"
